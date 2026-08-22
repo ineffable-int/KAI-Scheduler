@@ -15,9 +15,11 @@ func CheckNodeConditionPredicate(node *v1.Node) (bool, []string, error) {
 	}
 	reasons := []string{}
 
-	if node.Spec.Unschedulable {
-		reasons = append(reasons, "node is unschedulable")
-	}
+	// Unschedulable (cordoned) nodes are deliberately not filtered here: the
+	// node.kubernetes.io/unschedulable taint plus the TaintToleration plugin
+	// enforce cordons, which lets a pod explicitly tolerating that taint be
+	// scheduled onto a cordoned node — matching upstream kube-scheduler's
+	// NodeUnschedulable semantics. See kai-scheduler/KAI-Scheduler#1933.
 
 	for _, c := range node.Status.Conditions {
 		switch c.Type {
@@ -40,6 +42,11 @@ func CheckNodeConditionPredicate(node *v1.Node) (bool, []string, error) {
 }
 
 func ValidateIsNodeReady(node *v1.Node) bool {
+	// Cordoned nodes stay out of readiness/resource accounting even though
+	// CheckNodeConditionPredicate no longer filters them for scheduling.
+	if node != nil && node.Spec.Unschedulable {
+		return false
+	}
 	ready, _, _ := CheckNodeConditionPredicate(node)
 	return ready
 }
