@@ -75,6 +75,19 @@ func replicatedJobWithTemplateAnnotation(name string, replicas, parallelism int6
 	return rj
 }
 
+// replicatedJobDependingOn builds a replicatedJob gated behind another
+// replicatedJob reaching the given status, mirroring the JobSet dependsOn API.
+func replicatedJobDependingOn(name string, replicas, parallelism int64, dependsOnName, status string) map[string]interface{} {
+	rj := replicatedJob(name, replicas, parallelism)
+	rj["dependsOn"] = []interface{}{
+		map[string]interface{}{
+			"name":   dependsOnName,
+			"status": status,
+		},
+	}
+	return rj
+}
+
 func setStartupPolicy(js *unstructured.Unstructured, order string) {
 	js.Object["spec"].(map[string]interface{})["startupPolicy"] = map[string]interface{}{
 		"startupPolicyOrder": order,
@@ -454,4 +467,151 @@ func TestReplicasDefaultsToOne(t *testing.T) {
 	parent := findSubGroup(meta, "worker")
 	require.NotNil(t, parent)
 	assert.Equal(t, ptr.To(int32(1)), parent.MinSubGroup)
+}
+
+// TestDependsOnLauncherRootMinSubGroup covers the MPI-style shape: a worker
+// replicatedJob plus a launcher gated behind it. The launcher Job does not
+// exist until the worker is Ready, so the root MinSubGroup must be the size of
+// the initial wave (1), not len(replicatedJobs).
+func TestDependsOnLauncherRootMinSubGroup(t *testing.T) {
+	js := baseJobSet("js", "default", "uid", []map[string]interface{}{
+		replicatedJob("node", 1, 4),
+		replicatedJobDependingOn("launcher", 1, 1, "node", "Ready"),
+	})
+	pod := podWithJobSetLabels("p", "default", "node", "0")
+
+	meta, err := newJobSetGrouper(t).GetPodGroupMetadata(js, pod)
+	require.NoError(t, err)
+
+	require.NotNil(t, meta.MinSubGroup)
+	assert.Equal(t, int32(1), *meta.MinSubGroup,
+		"only the dependency-free initial wave is created up front")
+
+	// The subgroup tree still describes every replicatedJob, so the launcher can
+	// be admitted as the next subgroup once JobSet creates it.
+	require.Len(t, meta.SubGroups, 4)
+
+	nodeParent := findSubGroup(meta, "node")
+	require.NotNil(t, nodeParent)
+	require.NotNil(t, nodeParent.MinSubGroup)
+	assert.Equal(t, int32(1), *nodeParent.MinSubGroup)
+	assert.Nil(t, nodeParent.Parent)
+
+	nodeLeaf := findSubGroup(meta, "node-replica-0")
+	require.NotNil(t, nodeLeaf)
+	require.NotNil(t, nodeLeaf.Parent)
+	assert.Equal(t, "node", *nodeLeaf.Parent)
+	assert.Equal(t, int32(4), nodeLeaf.MinAvailable)
+	assert.Contains(t, nodeLeaf.PodsReferences, "p")
+
+	launcherParent := findSubGroup(meta, "launcher")
+	require.NotNil(t, launcherParent)
+	require.NotNil(t, launcherParent.MinSubGroup)
+	assert.Equal(t, int32(1), *launcherParent.MinSubGroup)
+	assert.Nil(t, launcherParent.Parent)
+
+	launcherLeaf := findSubGroup(meta, "launcher-replica-0")
+	require.NotNil(t, launcherLeaf)
+	require.NotNil(t, launcherLeaf.Parent)
+	assert.Equal(t, "launcher", *launcherLeaf.Parent)
+	assert.Equal(t, int32(1), launcherLeaf.MinAvailable)
+	assert.Empty(t, launcherLeaf.PodsReferences, "the launcher pod does not exist yet")
+}
+
+// TestDependsOnKeepsInitialWaveAsGang guards the reason for counting the
+// initial wave instead of returning a blanket 1: a and b are independent roles
+// that must be admitted together, while c is gated behind a.
+func TestDependsOnKeepsInitialWaveAsGang(t *testing.T) {
+	js := baseJobSet("js", "default", "uid", []map[string]interface{}{
+		replicatedJob("a", 1, 1),
+		replicatedJob("b", 1, 1),
+		replicatedJobDependingOn("c", 1, 1, "a", "Ready"),
+	})
+	pod := podWithJobSetLabels("p", "default", "a", "0")
+
+	meta, err := newJobSetGrouper(t).GetPodGroupMetadata(js, pod)
+	require.NoError(t, err)
+	require.NotNil(t, meta.MinSubGroup)
+	assert.Equal(t, int32(2), *meta.MinSubGroup,
+		"a and b form the initial wave and stay a gang")
+}
+
+// TestDependsOnChain covers a linear chain: only the first replicatedJob is
+// dependency-free.
+func TestDependsOnChain(t *testing.T) {
+	js := baseJobSet("js", "default", "uid", []map[string]interface{}{
+		replicatedJob("prepare", 1, 1),
+		replicatedJobDependingOn("train", 1, 1, "prepare", "Complete"),
+		replicatedJobDependingOn("evaluate", 1, 1, "train", "Complete"),
+	})
+	pod := podWithJobSetLabels("p", "default", "prepare", "0")
+
+	meta, err := newJobSetGrouper(t).GetPodGroupMetadata(js, pod)
+	require.NoError(t, err)
+	require.NotNil(t, meta.MinSubGroup)
+	assert.Equal(t, int32(1), *meta.MinSubGroup)
+}
+
+// TestEmptyDependsOnListCountsAsInitialWave: an explicitly empty dependsOn list
+// is not a dependency.
+func TestEmptyDependsOnListCountsAsInitialWave(t *testing.T) {
+	rj := replicatedJob("b", 1, 1)
+	rj["dependsOn"] = []interface{}{}
+	js := baseJobSet("js", "default", "uid", []map[string]interface{}{
+		replicatedJob("a", 1, 1),
+		rj,
+	})
+	pod := podWithJobSetLabels("p", "default", "a", "0")
+
+	meta, err := newJobSetGrouper(t).GetPodGroupMetadata(js, pod)
+	require.NoError(t, err)
+	require.NotNil(t, meta.MinSubGroup)
+	assert.Equal(t, int32(2), *meta.MinSubGroup)
+}
+
+// TestJobSetAnnotationWinsOverDependsOn: an explicit batch-min-member
+// annotation keeps its existing precedence.
+func TestJobSetAnnotationWinsOverDependsOn(t *testing.T) {
+	js := baseJobSet("js", "default", "uid", []map[string]interface{}{
+		replicatedJob("node", 1, 1),
+		replicatedJobDependingOn("launcher", 1, 1, "node", "Ready"),
+	})
+	js.SetAnnotations(map[string]string{constants.MinMemberOverrideKey: "2"})
+	pod := podWithJobSetLabels("p", "default", "node", "0")
+
+	meta, err := newJobSetGrouper(t).GetPodGroupMetadata(js, pod)
+	require.NoError(t, err)
+	require.NotNil(t, meta.MinSubGroup)
+	assert.Equal(t, int32(2), *meta.MinSubGroup)
+}
+
+// TestNoDependsOnUnchanged pins the pre-existing AnyOrder behaviour.
+func TestNoDependsOnUnchanged(t *testing.T) {
+	js := baseJobSet("js", "default", "uid", []map[string]interface{}{
+		replicatedJob("a", 1, 1),
+		replicatedJob("b", 1, 1),
+		replicatedJob("c", 1, 1),
+	})
+	pod := podWithJobSetLabels("p", "default", "a", "0")
+
+	meta, err := newJobSetGrouper(t).GetPodGroupMetadata(js, pod)
+	require.NoError(t, err)
+	require.NotNil(t, meta.MinSubGroup)
+	assert.Equal(t, int32(3), *meta.MinSubGroup)
+}
+
+// TestDependsOnMalformed surfaces a type error in spec rather than silently
+// treating the replicatedJob as dependency-free.
+func TestDependsOnMalformed(t *testing.T) {
+	rj := replicatedJob("b", 1, 1)
+	rj["dependsOn"] = "not-a-list"
+	js := baseJobSet("js", "default", "uid", []map[string]interface{}{
+		replicatedJob("a", 1, 1),
+		rj,
+	})
+	pod := podWithJobSetLabels("p", "default", "a", "0")
+
+	_, err := newJobSetGrouper(t).GetPodGroupMetadata(js, pod)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "dependsOn")
 }
