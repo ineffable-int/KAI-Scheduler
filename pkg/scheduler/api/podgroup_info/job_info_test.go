@@ -20,6 +20,7 @@ limitations under the License.
 package podgroup_info
 
 import (
+	"fmt"
 	"reflect"
 	"testing"
 
@@ -1459,6 +1460,58 @@ func TestPodGroupInfo_GetSchedulingConstraintsSignature(t *testing.T) {
 	}
 }
 
+// attachPodSets replaces the default tree with a root holding exactly these pod
+// sets. Setting PodSets alone leaves the flat map and the tree disagreeing,
+// which FromPodGroup never produces.
+func attachPodSets(pgi *PodGroupInfo, podSets ...*subgroup_info.PodSet) {
+	root := subgroup_info.NewSubGroupSet(subgroup_info.RootSubGroupSetName, nil)
+	for _, podSet := range podSets {
+		root.AddPodSet(podSet)
+	}
+	pgi.RootSubGroupSet = root
+	pgi.PodSets = root.GetDescendantPodSets()
+}
+
+// runningTask is a Running pod assigned to one leaf subgroup by label.
+func runningTask(uid, name, subGroup string) *pod_info.PodInfo {
+	return pod_info.NewTaskInfo(&v1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			UID:       types.UID(uid),
+			Namespace: "ns",
+			Name:      name,
+			Labels:    map[string]string{commonconstants.SubGroupLabelKey: subGroup},
+		},
+		Status: v1.PodStatus{Phase: v1.PodRunning},
+	}, resource_info.NewResourceVectorMap())
+}
+
+// replicatedJobSubGroup mirrors the pod-grouper's per-replicatedJob output: a
+// subgroup requiring all of its replica leaves, each leaf requiring one pod.
+func replicatedJobSubGroup(name string, replicas int32) *subgroup_info.SubGroupSet {
+	group := subgroup_info.NewSubGroupSet(name, nil)
+	group.SetMinSubGroup(ptr.To(replicas))
+	for i := int32(0); i < replicas; i++ {
+		group.AddPodSet(subgroup_info.NewPodSet(fmt.Sprintf("%s-replica-%d", name, i), 1, nil))
+	}
+	return group
+}
+
+// dependsOnJobSet is the tree derived for a JobSet whose launcher waits on the
+// worker: both replicatedJobs get a subgroup, but the root requires only the
+// initial wave, since the launcher has no pods until the worker is Ready.
+func dependsOnJobSet(workerReplicas int32) *PodGroupInfo {
+	pgi := NewPodGroupInfo("test-podgroup")
+
+	root := subgroup_info.NewSubGroupSet(subgroup_info.RootSubGroupSetName, nil)
+	root.SetMinSubGroup(ptr.To(int32(1)))
+	root.AddSubGroup(replicatedJobSubGroup("node", workerReplicas))
+	root.AddSubGroup(replicatedJobSubGroup("launcher", 1))
+
+	pgi.RootSubGroupSet = root
+	pgi.PodSets = root.GetDescendantPodSets()
+	return pgi
+}
+
 func TestPodGroupInfo_IsStale(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -1560,11 +1613,10 @@ func TestPodGroupInfo_IsStale(t *testing.T) {
 			job: func() *PodGroupInfo {
 				pgi := NewPodGroupInfo("test-podgroup")
 
-				sg1 := subgroup_info.NewPodSet("sg1", 1, nil)
-				pgi.PodSets["sg1"] = sg1
-
-				sg2 := subgroup_info.NewPodSet("sg2", 1, nil)
-				pgi.PodSets["sg2"] = sg2
+				attachPodSets(pgi,
+					subgroup_info.NewPodSet("sg1", 1, nil),
+					subgroup_info.NewPodSet("sg2", 1, nil),
+				)
 
 				task1 := pod_info.NewTaskInfo(&v1.Pod{
 					ObjectMeta: metav1.ObjectMeta{
@@ -1602,12 +1654,10 @@ func TestPodGroupInfo_IsStale(t *testing.T) {
 			job: func() *PodGroupInfo {
 				pgi := NewPodGroupInfo("test-podgroup")
 
-				sg1 := subgroup_info.NewPodSet("sg1", 1, nil)
-				sg2 := subgroup_info.NewPodSet("sg2", 1, nil)
-				pgi.PodSets = map[string]*subgroup_info.PodSet{
-					"sg1": sg1,
-					"sg2": sg2,
-				}
+				attachPodSets(pgi,
+					subgroup_info.NewPodSet("sg1", 1, nil),
+					subgroup_info.NewPodSet("sg2", 1, nil),
+				)
 
 				task1 := pod_info.NewTaskInfo(&v1.Pod{
 					ObjectMeta: metav1.ObjectMeta{
@@ -1636,6 +1686,37 @@ func TestPodGroupInfo_IsStale(t *testing.T) {
 				pgi.AddTaskInfo(task1)
 				pgi.AddTaskInfo(task2)
 
+				return pgi
+			}(),
+			expected: false,
+		},
+		{
+			// Regression for the livelock: calling this stale evicts the
+			// running worker, so the launcher is never created and it cycles.
+			name: "dependent subgroup empty while the initial wave runs, not stale",
+			job: func() *PodGroupInfo {
+				pgi := dependsOnJobSet(1)
+				pgi.AddTaskInfo(runningTask("1", "worker-0", "node-replica-0"))
+				return pgi
+			}(),
+			expected: false,
+		},
+		{
+			// The fix must not blanket-disable staleness.
+			name: "initial wave short of its own minimum, stale",
+			job: func() *PodGroupInfo {
+				pgi := dependsOnJobSet(2)
+				pgi.AddTaskInfo(runningTask("1", "worker-0", "node-replica-0"))
+				return pgi
+			}(),
+			expected: true,
+		},
+		{
+			name: "dependent subgroup filled once the launcher starts, not stale",
+			job: func() *PodGroupInfo {
+				pgi := dependsOnJobSet(1)
+				pgi.AddTaskInfo(runningTask("1", "worker-0", "node-replica-0"))
+				pgi.AddTaskInfo(runningTask("2", "launcher-0", "launcher-replica-0"))
 				return pgi
 			}(),
 			expected: false,
