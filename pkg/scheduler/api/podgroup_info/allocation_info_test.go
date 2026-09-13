@@ -730,3 +730,139 @@ func Test_getNumOfAllocatedTasks(t *testing.T) {
 		})
 	}
 }
+
+// memberOrderFn orders any SubGroupMember by name, mirroring the lexical
+// fallback in Session.SubGroupOrderFn when no plugin expresses a preference
+// (both children unsatisfied compare equal).
+func memberOrderFn(l, r interface{}) bool {
+	return l.(subgroup_info.SubGroupMember).GetName() < r.(subgroup_info.SubGroupMember).GetName()
+}
+
+// Test_GetTasksToAllocate_EmptyChildDoesNotConsumeGangSlot covers the case where
+// a child of a gang-phase SubGroupSet holds no allocatable pods. Such a child
+// must be skipped rather than consuming one of the min-members slots; otherwise
+// the collector returns fewer tasks than the gang needs -- or none at all -- and
+// the podgroup is never allocated.
+//
+// The empty-child case arises whenever pods appear over time, for example a
+// JobSet replicatedJob still gated behind dependsOn: its subgroup exists in the
+// PodGroup spec while its Job, and therefore every pod under it, does not.
+func Test_GetTasksToAllocate_EmptyChildDoesNotConsumeGangSlot(t *testing.T) {
+	// Flat shape: root minSubGroup=1 over two PodSets, the lexically-first of
+	// which is empty.
+	t.Run("flat: empty podset sorts first", func(t *testing.T) {
+		pg := NewPodGroupInfo("pg")
+		root := subgroup_info.NewSubGroupSet(subgroup_info.RootSubGroupSetName, nil)
+		root.SetMinSubGroup(ptrInt32(1))
+		pg.RootSubGroupSet = root
+		pg.PodSets = make(map[string]*subgroup_info.PodSet)
+
+		// "launcher" < "node", and both are unsatisfied, so "launcher" is
+		// visited first even though it has no pods.
+		empty := subgroup_info.NewPodSet("launcher", 1, nil)
+		root.AddPodSet(empty)
+		pg.PodSets["launcher"] = empty
+
+		worker := subgroup_info.NewPodSet("node", 4, nil)
+		root.AddPodSet(worker)
+		pg.PodSets["node"] = worker
+		for i := 0; i < 4; i++ {
+			pg.AddTaskInfo(simpleTask(fmt.Sprintf("node-%d", i), "node", pod_status.Pending))
+		}
+
+		got := GetTasksToAllocate(pg, memberOrderFn, tasksOrderFn, true)
+		if len(got) != 4 {
+			t.Errorf("GetTasksToAllocate len = %d, want 4 (the whole worker gang)", len(got))
+		}
+	})
+
+	// Nested shape, as the JobSet grouper builds it: root minSubGroup=1 over one
+	// SubGroupSet per replicatedJob, each holding one PodSet per replica.
+	t.Run("nested: empty subgroupset sorts first", func(t *testing.T) {
+		pg := NewPodGroupInfo("pg")
+		root := subgroup_info.NewSubGroupSet(subgroup_info.RootSubGroupSetName, nil)
+		root.SetMinSubGroup(ptrInt32(1))
+		pg.RootSubGroupSet = root
+		pg.PodSets = make(map[string]*subgroup_info.PodSet)
+
+		launcher := subgroup_info.NewSubGroupSet("launcher", nil)
+		launcher.SetMinSubGroup(ptrInt32(1))
+		launcherLeaf := subgroup_info.NewPodSet("launcher-replica-0", 1, nil)
+		launcher.AddPodSet(launcherLeaf)
+		launcher.SetParent(root)
+		root.AddSubGroup(launcher)
+		pg.PodSets["launcher-replica-0"] = launcherLeaf
+
+		node := subgroup_info.NewSubGroupSet("node", nil)
+		node.SetMinSubGroup(ptrInt32(1))
+		nodeLeaf := subgroup_info.NewPodSet("node-replica-0", 4, nil)
+		node.AddPodSet(nodeLeaf)
+		node.SetParent(root)
+		root.AddSubGroup(node)
+		pg.PodSets["node-replica-0"] = nodeLeaf
+		for i := 0; i < 4; i++ {
+			pg.AddTaskInfo(simpleTask(fmt.Sprintf("node-%d", i), "node-replica-0", pod_status.Pending))
+		}
+
+		got := GetTasksToAllocate(pg, memberOrderFn, tasksOrderFn, true)
+		if len(got) != 4 {
+			t.Errorf("GetTasksToAllocate len = %d, want 4 (the whole worker gang)", len(got))
+		}
+	})
+
+	// Skipping empty children must not over-collect: with minSubGroup=2 and two
+	// populated children plus an empty one, both populated children are taken.
+	t.Run("empty child skipped, remaining gang still bounded by minSubGroup", func(t *testing.T) {
+		pg := NewPodGroupInfo("pg")
+		root := subgroup_info.NewSubGroupSet(subgroup_info.RootSubGroupSetName, nil)
+		root.SetMinSubGroup(ptrInt32(2))
+		pg.RootSubGroupSet = root
+		pg.PodSets = make(map[string]*subgroup_info.PodSet)
+
+		// "a" is empty and sorts first; "b" and "c" have one pending pod each;
+		// "d" is populated but must not be collected once the gang is covered.
+		for _, name := range []string{"a", "b", "c", "d"} {
+			ps := subgroup_info.NewPodSet(name, 1, nil)
+			root.AddPodSet(ps)
+			pg.PodSets[name] = ps
+		}
+		for _, name := range []string{"b", "c", "d"} {
+			pg.AddTaskInfo(simpleTask("task-"+name, name, pod_status.Pending))
+		}
+
+		got := GetTasksToAllocate(pg, memberOrderFn, tasksOrderFn, true)
+		if len(got) != 2 {
+			t.Errorf("GetTasksToAllocate len = %d, want 2", len(got))
+		}
+	})
+
+	// Children already counted towards the min requirement reduce how many more
+	// must be collected.
+	t.Run("already-allocated child reduces members still to collect", func(t *testing.T) {
+		pg := NewPodGroupInfo("pg")
+		root := subgroup_info.NewSubGroupSet(subgroup_info.RootSubGroupSetName, nil)
+		root.SetMinSubGroup(ptrInt32(2))
+		pg.RootSubGroupSet = root
+		pg.PodSets = make(map[string]*subgroup_info.PodSet)
+
+		for _, name := range []string{"a", "b", "c"} {
+			ps := subgroup_info.NewPodSet(name, 1, nil)
+			root.AddPodSet(ps)
+			pg.PodSets[name] = ps
+		}
+		// "a" is already running, so it satisfies its own gang and counts
+		// towards the root min requirement.
+		pg.AddTaskInfo(simpleTask("task-a", "a", pod_status.Running))
+		pg.AddTaskInfo(simpleTask("task-b", "b", pod_status.Pending))
+		pg.AddTaskInfo(simpleTask("task-c", "c", pod_status.Pending))
+
+		got := GetTasksToAllocate(pg, memberOrderFn, tasksOrderFn, true)
+		if len(got) != 1 {
+			t.Errorf("GetTasksToAllocate len = %d, want 1 (only one more member needed)", len(got))
+		}
+	})
+}
+
+func ptrInt32(v int32) *int32 {
+	return &v
+}
