@@ -70,24 +70,8 @@ func (su *defaultStatusUpdater) cleanUpdatesForNonSeenPodGroups(usedKeys map[upd
 }
 
 func (su *defaultStatusUpdater) syncPodGroup(inFlightPodGroup, snapshotPodGroup *enginev2alpha2.PodGroup) podGroupStatusSyncResult {
-	staleTimeStampUpdated := false
-	if snapshotPodGroup.Annotations[commonconstants.StalePodgroupTimeStamp] == inFlightPodGroup.Annotations[commonconstants.StalePodgroupTimeStamp] {
-		staleTimeStampUpdated = true
-	} else {
-		if snapshotPodGroup.Annotations == nil {
-			snapshotPodGroup.Annotations = make(map[string]string)
-		}
-		snapshotPodGroup.Annotations[commonconstants.StalePodgroupTimeStamp] = inFlightPodGroup.Annotations[commonconstants.StalePodgroupTimeStamp]
-	}
-	lastStartTimestampUpdated := false
-	if snapshotPodGroup.Annotations[commonconstants.LastStartTimeStamp] == inFlightPodGroup.Annotations[commonconstants.LastStartTimeStamp] {
-		lastStartTimestampUpdated = true
-	} else {
-		if snapshotPodGroup.Annotations == nil {
-			snapshotPodGroup.Annotations = make(map[string]string)
-		}
-		snapshotPodGroup.Annotations[commonconstants.LastStartTimeStamp] = inFlightPodGroup.Annotations[commonconstants.LastStartTimeStamp]
-	}
+	staleTimeStampUpdated := syncAnnotation(inFlightPodGroup, snapshotPodGroup, commonconstants.StalePodgroupTimeStamp)
+	lastStartTimestampUpdated := syncAnnotation(inFlightPodGroup, snapshotPodGroup, commonconstants.LastStartTimeStamp)
 
 	statusComparison := compareSchedulingConditions(inFlightPodGroup, snapshotPodGroup)
 
@@ -99,6 +83,25 @@ func (su *defaultStatusUpdater) syncPodGroup(inFlightPodGroup, snapshotPodGroup 
 	}
 
 	return statusComparison
+}
+
+// syncAnnotation copies the in-flight value of key into the snapshot, deleting it when the
+// in-flight update has no such key. Returns whether the two already matched.
+func syncAnnotation(inFlightPodGroup, snapshotPodGroup *enginev2alpha2.PodGroup, key string) bool {
+	inFlightValue, inFlightFound := inFlightPodGroup.Annotations[key]
+	snapshotValue, snapshotFound := snapshotPodGroup.Annotations[key]
+	if inFlightFound == snapshotFound && inFlightValue == snapshotValue {
+		return true
+	}
+	if !inFlightFound {
+		delete(snapshotPodGroup.Annotations, key)
+		return false
+	}
+	if snapshotPodGroup.Annotations == nil {
+		snapshotPodGroup.Annotations = make(map[string]string)
+	}
+	snapshotPodGroup.Annotations[key] = inFlightValue
+	return false
 }
 
 func compareSchedulingConditions(inFlightPodGroup, snapshotPodGroup *enginev2alpha2.PodGroup) podGroupStatusSyncResult {

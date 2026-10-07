@@ -786,7 +786,7 @@ func TestDefaultStatusUpdater_RetryAfterError(t *testing.T) {
 		},
 	}
 
-	patchData, err := getPodGroupPatch(job, jobCopy)
+	patchData, err := getPodGroupAnnotationsPatch(job.Annotations, jobCopy.Annotations)
 	assert.NoError(t, err)
 
 	go func() {
