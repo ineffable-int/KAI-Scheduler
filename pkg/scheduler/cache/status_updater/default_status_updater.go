@@ -10,9 +10,9 @@ import (
 	"slices"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
-	"gomodules.xyz/jsonpatch/v2"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -56,6 +56,7 @@ type inflightUpdate struct {
 	patchData    []byte
 	updateStatus bool
 	subResources []string
+	retries      atomic.Int32
 
 	writtenResourceVersions []string
 }
@@ -508,15 +509,7 @@ func (su *defaultStatusUpdater) updatePodGroupAnnotations(job *podgroup_info.Pod
 		return nil, nil
 	}
 
-	patchData, err := getPodGroupPatch(old, job.PodGroup)
-	if err != nil {
-		return nil, err
-	}
-
-	if patchData == nil {
-		return nil, nil
-	}
-	return patchData, nil
+	return getPodGroupAnnotationsPatch(old.Annotations, job.PodGroup.Annotations)
 }
 
 func (su *defaultStatusUpdater) recordUnschedulablePodGroup(job *podgroup_info.PodGroupInfo) bool {
@@ -745,25 +738,22 @@ func squashAndAppendConditionsForNodepool(podGroup *enginev2alpha2.PodGroup, sch
 	podGroup.Status.SchedulingConditions = squashedConditions
 }
 
-func getPodGroupPatch(old *enginev2alpha2.PodGroup, new *enginev2alpha2.PodGroup) ([]byte, error) {
-	origJSON, err := json.Marshal(old)
-	if err != nil {
-		return nil, err
+// getPodGroupAnnotationsPatch returns a JSON merge patch from oldAnnotations to newAnnotations.
+// Unlike a JSON patch, it does not fail when the live object no longer has a removed key.
+func getPodGroupAnnotationsPatch(oldAnnotations, newAnnotations map[string]string) ([]byte, error) {
+	changes := map[string]*string{}
+	for key, value := range newAnnotations {
+		if oldValue, found := oldAnnotations[key]; !found || oldValue != value {
+			changes[key] = &value
+		}
 	}
-
-	mutatedJSON, err := json.Marshal(new)
-	if err != nil {
-		return nil, err
+	for key := range oldAnnotations {
+		if _, found := newAnnotations[key]; !found {
+			changes[key] = nil
+		}
 	}
-
-	patches, err := jsonpatch.CreatePatch(origJSON, mutatedJSON)
-	if err != nil {
-		return nil, err
-	}
-
-	if len(patches) == 0 {
+	if len(changes) == 0 {
 		return nil, nil
 	}
-
-	return json.Marshal(patches)
+	return json.Marshal(map[string]any{"metadata": map[string]any{"annotations": changes}})
 }
