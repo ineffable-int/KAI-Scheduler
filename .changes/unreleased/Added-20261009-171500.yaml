@@ -1,0 +1,3 @@
+kind: Added
+body: 'priority plugin argument `consolidationRespectPriority`: consolidation only evicts jobs of strictly lower priority than the job it makes room for, as preempt does. Adds a consolidation victim filter hook (`AddConsolidationVictimFilterFn`) for plugins.'
+time: 2026-10-09T17:15:00.000000000Z
