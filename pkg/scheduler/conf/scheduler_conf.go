@@ -40,6 +40,7 @@ type SchedulerParams struct {
 	UseSchedulingSignatures           bool                        `json:"useSchedulingSignatures,omitempty"`
 	FullHierarchyFairness             bool                        `json:"fullHierarchyFairness,omitempty"`
 	AllowConsolidatingReclaim         bool                        `json:"allowConsolidatingReclaim,omitempty"`
+	PruneVictims                      bool                        `json:"pruneVictims,omitempty"`
 	NumOfStatusRecordingWorkers       int                         `json:"numOfStatusRecordingWorkers,omitempty"`
 	GlobalDefaultStalenessGracePeriod time.Duration               `json:"globalDefaultStalenessGracePeriod,omitempty"`
 	SchedulePeriod                    time.Duration               `json:"schedulePeriod,omitempty"`

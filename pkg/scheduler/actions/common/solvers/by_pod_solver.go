@@ -43,6 +43,7 @@ type byPodSolver struct {
 	feasibleNodes            map[string]*node_info.NodeInfo
 	solutionValidator        SolutionValidator
 	allowVictimConsolidation bool
+	pruneVictims             bool
 	actionType               framework.ActionType
 }
 
@@ -50,12 +51,14 @@ func newByPodSolver(
 	feasibleNodes map[string]*node_info.NodeInfo,
 	checkVictims SolutionValidator,
 	allowVictimConsolidation bool,
+	pruneVictims bool,
 	action framework.ActionType,
 ) *byPodSolver {
 	return &byPodSolver{
 		feasibleNodes:            feasibleNodes,
 		solutionValidator:        checkVictims,
 		allowVictimConsolidation: allowVictimConsolidation,
+		pruneVictims:             pruneVictims,
 		actionType:               action,
 	}
 }
@@ -90,7 +93,7 @@ func (s *byPodSolver) solve(session *framework.Session, scenario *scenario.ByNod
 
 	result := s.runSimulation(session, scenario, statement, allVictims, maps.Values(s.feasibleNodes))
 	if result != nil {
-		if result.solved {
+		if result.solved && s.pruneVictims {
 			if pruned := s.pruneSolution(session, scenario, statement, allVictims, originalNodes); pruned != nil {
 				result = pruned
 			}

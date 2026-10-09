@@ -68,6 +68,7 @@ type ServerOption struct {
 	UseSchedulingSignatures           bool
 	FullHierarchyFairness             bool
 	AllowConsolidatingReclaim         bool
+	PruneVictims                      bool
 	NumOfStatusRecordingWorkers       int
 	GlobalDefaultStalenessGracePeriod time.Duration
 	StuckInReleasingThreshold         time.Duration
@@ -126,6 +127,7 @@ func (s *ServerOption) AddFlags(fs *pflag.FlagSet) {
 	fs.BoolVar(&s.UseSchedulingSignatures, "use-scheduling-signatures", true, "Use scheduling signatures to avoid duplicate scheduling attempts for identical jobs")
 	fs.BoolVar(&s.FullHierarchyFairness, "full-hierarchy-fairness", true, "Fairness across project and department levels")
 	fs.BoolVar(&s.AllowConsolidatingReclaim, "allow-consolidating-reclaim", true, "Do not count pipelined pods towards 'reclaimed' resources")
+	fs.BoolVar(&s.PruneVictims, "prune-victims", true, "After a successful eviction scenario, drop victims that free no node the preemptor is placed on, if the scenario still succeeds without them")
 	fs.IntVar(&s.NumOfStatusRecordingWorkers, "num-of-status-recording-workers", defaultNumOfStatusRecordingWorkers, "specifies the max number of go routines spawned to update pod and podgroups conditions and events. Defaults to 5")
 	fs.DurationVar(&s.GlobalDefaultStalenessGracePeriod, "default-staleness-grace-period", defaultStalenessGracePeriod, "Global default staleness grace period duration. Negative values means infinite. Defaults to 60s")
 	fs.DurationVar(&s.StuckInReleasingThreshold, "stuck-in-releasing-threshold", constants.DefaultStuckInReleasingThreshold, "Duration after a Running pod's deletionTimestamp before its resources are excluded from pipelining. Defaults to 2m.")
