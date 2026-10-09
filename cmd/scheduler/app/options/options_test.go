@@ -62,6 +62,7 @@ func TestAddFlags(t *testing.T) {
 		UpdatePodEvictionCondition:        false,
 		UseSchedulingSignatures:           true,
 		AllowConsolidatingReclaim:         true,
+		PruneVictims:                      true,
 		PyroscopeBlockProfilerRate:        DefaultPyroscopeBlockProfilerRate,
 		PyroscopeMutexProfilerRate:        DefaultPyroscopeMutexProfilerRate,
 		GlobalDefaultStalenessGracePeriod: defaultStalenessGracePeriod,

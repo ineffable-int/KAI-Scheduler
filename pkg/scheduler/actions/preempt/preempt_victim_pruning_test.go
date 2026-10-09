@@ -21,9 +21,16 @@ import (
 // runPreemptAndCollectVictims runs preempt and returns the number of evicted or moved
 // non-preemptor pods per original node, and the number of preemptor pods placed.
 func runPreemptAndCollectVictims(t *testing.T, topo test_utils.TestTopologyBasic) (map[string]int, int) {
+	return runPreemptAndCollectVictimsWithPruning(t, topo, true)
+}
+
+func runPreemptAndCollectVictimsWithPruning(
+	t *testing.T, topo test_utils.TestTopologyBasic, pruneVictims bool,
+) (map[string]int, int) {
 	controller := NewController(t)
 	defer controller.Finish()
 	ssn := test_utils.BuildSession(topo, controller)
+	ssn.OverridePruneVictims(pruneVictims)
 	before := map[string]string{}
 	for _, job := range ssn.ClusterInfo.PodGroupInfos {
 		for _, task := range job.GetAllPodsMap() {
@@ -52,9 +59,47 @@ func runPreemptAndCollectVictims(t *testing.T, topo test_utils.TestTopologyBasic
 
 // A gang pinned to the nodes of one group must only evict pods on those nodes, not pods
 // on other nodes that the simulation evicted and then moved elsewhere.
+const groups, perGroup = 3, 8
+
 func TestPreemptPinnedGangEvictsOnlyPinnedNodes(t *testing.T) {
 	test_utils.InitTestingInfrastructure()
-	const groups, perGroup = 3, 8
+	victims, placed := runPreemptAndCollectVictims(t, pinnedGangTopology())
+	if placed != perGroup {
+		t.Fatalf("preemptor placed %d of %d pods", placed, perGroup)
+	}
+	total := 0
+	for node, n := range victims {
+		total += n
+		if !strings.HasPrefix(node, "g0-") {
+			t.Errorf("victim on unpinned node %s", node)
+		}
+	}
+	if total != perGroup {
+		t.Errorf("expected %d victims, got %d", perGroup, total)
+	}
+}
+
+// With --prune-victims=false the solver keeps victims on nodes the gang cannot use.
+func TestPreemptPinnedGangWithoutPruning(t *testing.T) {
+	test_utils.InitTestingInfrastructure()
+	victims, placed := runPreemptAndCollectVictimsWithPruning(t, pinnedGangTopology(), false)
+	if placed != perGroup {
+		t.Fatalf("preemptor placed %d of %d pods", placed, perGroup)
+	}
+	unpinned := 0
+	for node, n := range victims {
+		if !strings.HasPrefix(node, "g0-") {
+			unpinned += n
+		}
+	}
+	if unpinned == 0 {
+		t.Errorf("expected victims on unpinned nodes without pruning, got %v", victims)
+	}
+}
+
+// pinnedGangTopology: three groups of eight 4-GPU nodes, each node full with one victim job.
+// The preemptor is a gang of eight pods pinned to the nodes of group 0.
+func pinnedGangTopology() test_utils.TestTopologyBasic {
 	nodes := map[string]nodes_fake.TestNodeBasic{}
 	var jobs []*jobs_fake.TestJobBasic
 	age := 1000
@@ -78,25 +123,12 @@ func TestPreemptPinnedGangEvictsOnlyPinnedNodes(t *testing.T) {
 	jobs = append(jobs, &jobs_fake.TestJobBasic{Name: "preemptor", RequiredGPUsPerTask: 4, Priority: 75,
 		QueueName: "q", Tasks: gang, JobAgeInMinutes: 1})
 
-	victims, placed := runPreemptAndCollectVictims(t, test_utils.TestTopologyBasic{
+	return test_utils.TestTopologyBasic{
 		Name: "pinned gang", Nodes: nodes, Jobs: jobs,
 		Queues: []test_utils.TestQueueBasic{{Name: "q", DeservedGPUs: 4 * groups * perGroup, GPUOverQuotaWeight: 1,
 			MaxAllowedGPUs: -1}},
 		Mocks: &test_utils.TestMock{CacheRequirements: &test_utils.CacheMocking{
 			NumberOfCacheEvictions: 1000, NumberOfPipelineActions: 1000}},
-	})
-	if placed != perGroup {
-		t.Fatalf("preemptor placed %d of %d pods", placed, perGroup)
-	}
-	total := 0
-	for node, n := range victims {
-		total += n
-		if !strings.HasPrefix(node, "g0-") {
-			t.Errorf("victim on unpinned node %s", node)
-		}
-	}
-	if total != perGroup {
-		t.Errorf("expected %d victims, got %d", perGroup, total)
 	}
 }
 
