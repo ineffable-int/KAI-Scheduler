@@ -210,7 +210,14 @@ func allocateTaskToNode(ssn *framework.Session, stmt *framework.Statement, task 
 	}
 
 	if taskAllocatable := node.IsTaskAllocatable(task); !isPipelineOnly && taskAllocatable {
-		return bindTaskToNode(ssn, stmt, task, node)
+		ready, err := ssn.IsTaskReadyForBinding(task, node)
+		if err != nil {
+			log.InfraLogger.Errorf("Failed to evaluate binding readiness for task %v on %v: %v", task.UID, node.Name, err)
+			return false
+		}
+		if ready {
+			return bindTaskToNode(ssn, stmt, task, node)
+		}
 	}
 	return pipelineTaskToNode(ssn, stmt, task, node, !isPipelineOnly)
 }

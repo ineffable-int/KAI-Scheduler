@@ -1,0 +1,3 @@
+kind: Added
+body: 'dynamicresources plugin argument `pipelineOverReleasingClaims`: a task whose only DRA obstacle on a node is devices held by releasing pods is pipelined there instead of triggering more evictions, and a new binding-readiness hook holds the bind until the devices are free.'
+time: 2026-10-09T17:00:00.000000000Z
