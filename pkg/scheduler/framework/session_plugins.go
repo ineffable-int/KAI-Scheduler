@@ -64,6 +64,22 @@ func (ssn *Session) AddPredicateFn(pf api.PredicateFn) {
 	ssn.PredicateFns = append(ssn.PredicateFns, pf)
 }
 
+// AddBindReadyFn registers a check for immediate allocation readiness.
+func (ssn *Session) AddBindReadyFn(fn api.BindReadyFn) {
+	ssn.BindReadyFns = append(ssn.BindReadyFns, fn)
+}
+
+// IsTaskReadyForBinding returns false for placements that must remain pipelined.
+func (ssn *Session) IsTaskReadyForBinding(task *pod_info.PodInfo, node *node_info.NodeInfo) (bool, error) {
+	for _, fn := range ssn.BindReadyFns {
+		ready, err := fn(task, node)
+		if err != nil || !ready {
+			return false, err
+		}
+	}
+	return true, nil
+}
+
 func (ssn *Session) AddJobOrderFn(jof common_info.CompareFn) {
 	ssn.JobOrderFns = append(ssn.JobOrderFns, jof)
 }

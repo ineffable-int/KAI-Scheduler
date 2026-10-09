@@ -10,6 +10,7 @@ import (
 
 	v1 "k8s.io/api/core/v1"
 	resourceapi "k8s.io/api/resource/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/component-helpers/scheduling/corev1/nodeaffinity"
 	"k8s.io/dynamic-resource-allocation/cel"
 	"k8s.io/dynamic-resource-allocation/deviceclass/extendedresourcecache"
@@ -24,6 +25,7 @@ import (
 	"github.com/kai-scheduler/KAI-scheduler/pkg/common/resources"
 	"github.com/kai-scheduler/KAI-scheduler/pkg/scheduler/api/node_info"
 	"github.com/kai-scheduler/KAI-scheduler/pkg/scheduler/api/pod_info"
+	"github.com/kai-scheduler/KAI-scheduler/pkg/scheduler/api/pod_status"
 	"github.com/kai-scheduler/KAI-scheduler/pkg/scheduler/api/podgroup_info"
 	"github.com/kai-scheduler/KAI-scheduler/pkg/scheduler/framework"
 	"github.com/kai-scheduler/KAI-scheduler/pkg/scheduler/log"
@@ -32,6 +34,11 @@ import (
 const (
 	defaultMaxCelCacheEntries = 10
 	maxCelCacheEntriesKey     = "maxCelCacheEntries"
+
+	// PipelineOverReleasingClaimsKey enables pipelining a task onto a node whose only DRA
+	// obstacle is devices held by releasing pods. The bind waits until those pods are gone.
+	PipelineOverReleasingClaimsKey     = "pipelineOverReleasingClaims"
+	defaultPipelineOverReleasingClaims = false
 )
 
 type draPlugin struct {
@@ -40,6 +47,11 @@ type draPlugin struct {
 	allocatorFeatures     structured.Features
 	queueLabelKey         string
 	deviceClassByResource *extendedresourcecache.ExtendedResourceCache
+
+	pipelineOverReleasingClaims bool
+	// podsByUID maps the session's pods by UID, to find claims whose consumers are all
+	// releasing. Set only when pipelineOverReleasingClaims is on.
+	podsByUID map[types.UID]*pod_info.PodInfo
 }
 
 // +kubebuilder:rbac:groups="resource.k8s.io",resources=deviceclasses;resourceslices;resourceclaims,verbs=get;list;watch
@@ -65,10 +77,17 @@ func New(pluginArgs framework.PluginArguments) framework.Plugin {
 			maxCelCacheEntriesKey, err, defaultMaxCelCacheEntries)
 	}
 
+	pipelineOverReleasingClaims, err := pluginArgs.GetBool(PipelineOverReleasingClaimsKey, defaultPipelineOverReleasingClaims)
+	if err != nil {
+		log.InfraLogger.Warningf("Failed to parse %s as bool: %v. Using default value of: %t",
+			PipelineOverReleasingClaimsKey, err, defaultPipelineOverReleasingClaims)
+	}
+
 	features := k8s_utils.GetK8sFeatures()
 	return &draPlugin{
-		celCache:          cel.NewCache(maxCelCacheEntries, cel.Features{EnableConsumableCapacity: features.EnableDRAConsumableCapacity}),
-		allocatorFeatures: allocatorFeatures(features),
+		celCache:                    cel.NewCache(maxCelCacheEntries, cel.Features{EnableConsumableCapacity: features.EnableDRAConsumableCapacity}),
+		allocatorFeatures:           allocatorFeatures(features),
+		pipelineOverReleasingClaims: pipelineOverReleasingClaims,
 	}
 }
 
@@ -99,6 +118,17 @@ func (drap *draPlugin) OnSessionOpen(ssn *framework.Session) {
 
 	ssn.AddPrePredicateFn(drap.preFilter)
 	ssn.AddPredicateFn(drap.filter)
+
+	drap.podsByUID = nil
+	if drap.pipelineOverReleasingClaims && drap.manager != nil {
+		drap.podsByUID = map[types.UID]*pod_info.PodInfo{}
+		for _, podGroup := range ssn.ClusterInfo.PodGroupInfos {
+			for _, pod := range podGroup.GetAllPodsMap() {
+				drap.podsByUID[pod.Pod.UID] = pod
+			}
+		}
+		ssn.AddBindReadyFn(drap.bindReady)
+	}
 }
 
 func (drap *draPlugin) assumePendingClaims(ssn *framework.Session) {
@@ -276,9 +306,34 @@ func (drap *draPlugin) filter(task *pod_info.PodInfo, _ *podgroup_info.PodGroupI
 		return nil
 	}
 
+	err := drap.checkAllocatable(nodeInfo, claimsToAllocate, false)
+	if err != nil && drap.pipelineOverReleasingClaims {
+		// The node fits if the only devices in the way are held by releasing pods. The task
+		// can then be pipelined there, and bindReady holds the bind until they are gone.
+		if drap.checkAllocatable(nodeInfo, claimsToAllocate, true) == nil {
+			log.InfraLogger.V(5).Do(func() {
+				log.InfraLogger.Infof("Task <%s/%s> fits node %s over DRA devices held by releasing pods",
+					task.Namespace, task.Name, nodeInfo.Name)
+			})
+			return nil
+		}
+	}
+	return err
+}
+
+// checkAllocatable reports whether claims can be allocated on node. With overReleasing, the
+// devices of claims whose consumers are all releasing pods count as free.
+func (drap *draPlugin) checkAllocatable(
+	nodeInfo *node_info.NodeInfo, claims []*resourceapi.ResourceClaim, overReleasing bool,
+) error {
 	allocatedState, err := drap.manager.ResourceClaims().GatherAllocatedState()
 	if err != nil {
 		return fmt.Errorf("failed to gather allocated device state: %v", err)
+	}
+	if overReleasing {
+		if allocatedState, err = drap.withoutReleasingDevices(allocatedState); err != nil {
+			return err
+		}
 	}
 
 	slices, err := drap.manager.ResourceSlices().ListWithDeviceTaintRules()
@@ -297,15 +352,76 @@ func (drap *draPlugin) filter(task *pod_info.PodInfo, _ *podgroup_info.PodGroupI
 		return fmt.Errorf("failed to create allocator: %v", err)
 	}
 
-	results, err := allocator.Allocate(context.Background(), nodeInfo.Node, claimsToAllocate)
+	results, err := allocator.Allocate(context.Background(), nodeInfo.Node, claims)
 	if err != nil {
 		return fmt.Errorf("cannot allocate DRA claims on node %s: %v", nodeInfo.Name, err)
 	}
-	if len(results) != len(claimsToAllocate) {
+	if len(results) != len(claims) {
 		return fmt.Errorf("cannot allocate all DRA claims on node %s", nodeInfo.Name)
 	}
 
 	return nil
+}
+
+// withoutReleasingDevices returns a copy of state without the exclusively allocated devices
+// of claims whose consumers are all releasing pods. Shared (consumable capacity) allocations
+// stay counted.
+func (drap *draPlugin) withoutReleasingDevices(state *structured.AllocatedState) (*structured.AllocatedState, error) {
+	claims, err := drap.manager.ResourceClaims().List()
+	if err != nil {
+		return nil, fmt.Errorf("failed to list resource claims: %v", err)
+	}
+	out := *state
+	out.AllocatedDevices = state.AllocatedDevices.Clone()
+	for _, claim := range claims {
+		if claim.Status.Allocation == nil || !drap.reservedOnlyForReleasingPods(claim) {
+			continue
+		}
+		for _, result := range claim.Status.Allocation.Devices.Results {
+			if result.ShareID != nil {
+				continue
+			}
+			out.AllocatedDevices.Delete(structured.MakeDeviceID(result.Driver, result.Pool, result.Device))
+		}
+	}
+	return &out, nil
+}
+
+func (drap *draPlugin) reservedOnlyForReleasingPods(claim *resourceapi.ResourceClaim) bool {
+	if len(claim.Status.ReservedFor) == 0 {
+		return false
+	}
+	for _, consumer := range claim.Status.ReservedFor {
+		pod := drap.podsByUID[consumer.UID]
+		if pod == nil || pod.Status != pod_status.Releasing {
+			return false
+		}
+	}
+	return true
+}
+
+// bindReady holds the bind of a task whose unallocated claims cannot be allocated on node
+// yet, because releasing pods still hold the devices. The task is pipelined instead and
+// bound in a later cycle, once those pods are gone.
+func (drap *draPlugin) bindReady(task *pod_info.PodInfo, nodeInfo *node_info.NodeInfo) (bool, error) {
+	var claims []*resourceapi.ResourceClaim
+	for _, podClaim := range task.Pod.Spec.ResourceClaims {
+		claimName, err := resources.GetResourceClaimName(task.Pod, &podClaim)
+		if err != nil {
+			return false, err
+		}
+		claim, err := drap.manager.ResourceClaims().Get(task.Namespace, claimName)
+		if err != nil {
+			return false, fmt.Errorf("failed to get resource claim %s/%s: %v", task.Namespace, claimName, err)
+		}
+		if claim.Status.Allocation == nil {
+			claims = append(claims, claim)
+		}
+	}
+	if len(claims) == 0 {
+		return true, nil
+	}
+	return drap.checkAllocatable(nodeInfo, claims, false) == nil, nil
 }
 
 // validateSharedGpuClaimQueueLabel validates that shared GPU DRA claims (non-template claims) have the correct queue label.
@@ -468,6 +584,15 @@ func (drap *draPlugin) allocateResourceClaim(task *pod_info.PodInfo, podClaim *v
 
 	if claim.Status.Allocation == nil {
 		result, err := drap.allocate(node, []*resourceapi.ResourceClaim{claim})
+		if (err != nil || result == nil) && drap.pipelineOverReleasingClaims && task.Status == pod_status.Pipelined {
+			// Pipelined over devices still held by releasing pods: nothing to allocate in this
+			// session. The claim is allocated when the task is bound in a later cycle.
+			log.InfraLogger.V(5).Do(func() {
+				log.InfraLogger.Infof("Claim <%s/%s> of pipelined pod not allocated yet: %v",
+					task.Namespace, claimName, err)
+			})
+			return nil
+		}
 		if err != nil {
 			return fmt.Errorf("failed to allocate resources: %v", err)
 		}
