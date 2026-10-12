@@ -184,3 +184,31 @@ func TestPipelineOverReleasingClaims_BindsWhenDeviceIsFree(t *testing.T) {
 	require.NoError(t, err)
 	assert.NotNil(t, claim.Status.Allocation)
 }
+
+// Fractional GPU and GPU memory tasks take the GPU sharing allocation path, which must also
+// pipeline, not bind, while the task's claim needs a device held by a releasing pod.
+func TestPipelineOverReleasingClaims_AllocateSharedGPU(t *testing.T) {
+	test_utils.InitTestingInfrastructure()
+	controller := NewController(t)
+	defer controller.Finish()
+
+	for name, configure := range map[string]func(*jobs_fake.TestJobBasic){
+		"fractional GPU": func(job *jobs_fake.TestJobBasic) { job.RequiredGPUsPerTask = 0.5 },
+		"GPU memory":     func(job *jobs_fake.TestJobBasic) { job.RequiredGpuMemory = 40 },
+	} {
+		topology := releasingClaimTopology(t, pod_status.Releasing, true, 0)
+		configure(topology.Jobs[1])
+		t.Run(name, func(t *testing.T) {
+			ssn := setupTestSession(t, topology, controller)
+			task := getTaskByStatus(t, ssn, "pending", pod_status.Pending)
+			require.True(t, task.IsSharedGPURequest())
+			allocate.New().Execute(ssn)
+
+			assert.Equal(t, pod_status.Pipelined, task.Status)
+			assert.Equal(t, "node0", task.NodeName)
+			claim, err := ssn.InternalK8sPlugins().SessionDRAManager.ResourceClaims().Get("test", "pending-channel")
+			require.NoError(t, err)
+			assert.Nil(t, claim.Status.Allocation, "a claim pipelined over releasing devices stays unallocated")
+		})
+	}
+}

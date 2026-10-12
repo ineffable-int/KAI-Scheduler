@@ -71,13 +71,15 @@ func (ssn *Session) AddBindReadyFn(fn api.BindReadyFn) {
 
 // IsTaskReadyForBinding returns false for placements that must remain pipelined.
 func (ssn *Session) IsTaskReadyForBinding(task *pod_info.PodInfo, node *node_info.NodeInfo) (bool, error) {
+	ready := true
 	for _, fn := range ssn.BindReadyFns {
-		ready, err := fn(task, node)
-		if err != nil || !ready {
+		result, err := fn(task, node)
+		if err != nil {
 			return false, err
 		}
+		ready = ready && result
 	}
-	return true, nil
+	return ready, nil
 }
 
 func (ssn *Session) AddJobOrderFn(jof common_info.CompareFn) {
