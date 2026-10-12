@@ -94,7 +94,7 @@ func (s *byPodSolver) solve(session *framework.Session, scenario *scenario.ByNod
 	result := s.runSimulation(session, scenario, statement, allVictims, maps.Values(s.feasibleNodes))
 	if result != nil {
 		if result.solved && s.pruneVictims {
-			if pruned := s.pruneSolution(session, scenario, statement, allVictims, originalNodes); pruned != nil {
+			if pruned := s.pruneSolution(session, scenario, statement, allVictims, originalNodes, result); pruned != nil {
 				result = pruned
 			}
 		}
@@ -130,11 +130,13 @@ func (s *byPodSolver) runSimulation(
 // with a pod on a node where the simulation placed a preemptor task. The other batches free
 // nothing the preemptor uses, yet they are still deleted on commit: the simulation either
 // re-placed them on another node (Pipelined, which does not move the pod) or could not
-// re-place them. The kept batches are re-simulated and the original solution is rebuilt if
-// that fails. Returns nil when there is nothing to prune.
+// re-place them. The kept batches are re-simulated as a fresh placement, which can land
+// differently, so the pruned solution is kept only if it is smaller than the original
+// (see prunedIsSmaller); otherwise the original solution is rebuilt. Returns nil when
+// there is nothing to prune.
 func (s *byPodSolver) pruneSolution(
 	session *framework.Session, sc *scenario.ByNodeScenario, statement *framework.Statement,
-	allVictims []*pod_info.PodInfo, originalNodes map[common_info.PodID]string,
+	allVictims []*pod_info.PodInfo, originalNodes map[common_info.PodID]string, original *solutionResult,
 ) *solutionResult {
 	preemptorNodes := map[string]bool{}
 	preemptorUID := sc.GetPreemptor().UID
@@ -197,9 +199,13 @@ func (s *byPodSolver) pruneSolution(
 	}
 	if err := common.EvictAllPreemptees(session, keptTasks, pendingJob, statement, s.actionType); err == nil {
 		if result := s.runSimulation(session, pruned, statement, keptTasks, nodes); result != nil && result.solved {
-			log.InfraLogger.V(4).Infof("Pruned victims for <%s/%s>: %d -> %d",
-				pendingJob.Namespace, pendingJob.Name, len(allVictims), len(keptTasks))
-			return result
+			if prunedIsSmaller(result, original) {
+				log.InfraLogger.V(4).Infof("Pruned victims for <%s/%s>: %d -> %d",
+					pendingJob.Namespace, pendingJob.Name, len(original.victimsTasks), len(result.victimsTasks))
+				return result
+			}
+			log.InfraLogger.V(4).Infof("Pruned solution for <%s/%s> is not smaller (%d -> %d victims), keeping the original",
+				pendingJob.Namespace, pendingJob.Name, len(original.victimsTasks), len(result.victimsTasks))
 		}
 	}
 
@@ -212,6 +218,21 @@ func (s *byPodSolver) pruneSolution(
 	}
 	statement.Discard()
 	return &solutionResult{false, nil, nil, nil}
+}
+
+// prunedIsSmaller accepts a pruned solution only if it evicts fewer pods and no more GPUs
+// than the original, so pruning never widens an eviction.
+func prunedIsSmaller(pruned, original *solutionResult) bool {
+	return len(pruned.victimsTasks) < len(original.victimsTasks) &&
+		victimGPUs(pruned.victimsTasks) <= victimGPUs(original.victimsTasks)
+}
+
+func victimGPUs(victims []*pod_info.PodInfo) float64 {
+	total := 0.0
+	for _, victim := range victims {
+		total += victim.AcceptedGpuRequirement.GetGpusQuota()
+	}
+	return total
 }
 
 func (s *byPodSolver) feasibleNodesRollback(newFeasibleNodes map[string]bool) {
