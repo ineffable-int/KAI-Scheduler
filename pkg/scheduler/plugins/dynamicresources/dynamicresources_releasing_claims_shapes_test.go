@@ -243,3 +243,49 @@ func TestPipelineOverReleasingClaims_SharedCounterDevicesStayStrict(t *testing.T
 	t.Log("after the holder disappears: both gang pods are still Pending")
 	require.LessOrEqual(t, counts["node0"]+counts["node1"], 1, "different DeviceIDs still consume the same exclusive backing capacity")
 }
+
+// Slices of an older pool generation linger while a driver republishes. Only the newest
+// generation, which the allocator uses, may make a device local to a node.
+func TestPipelineOverReleasingClaims_OnlyCurrentSlicesCountAsLocal(t *testing.T) {
+	test_utils.InitTestingInfrastructure()
+	controller := gomock.NewController(t)
+	gang := pendingChannelJob("gang", 1, 2)
+	topology := channelNodesTopology(t, []string{"node0", "node1"}, gang)
+	// A pool moved from node0 to node1, then became accessible from all nodes.
+	// Old generations coexist with the complete current generation during cleanup.
+	topology.Jobs = append(topology.Jobs[:1], topology.Jobs[2:]...)
+	topology.TestDRAObjects.ResourceClaims = append(topology.TestDRAObjects.ResourceClaims[:1], topology.TestDRAObjects.ResourceClaims[2:]...)
+	topology.TestDRAObjects.ResourceClaims[0].ClaimStatus.Allocation.Devices.Results[0].Pool = "cluster"
+	topology.TestDRAObjects.ResourceSlices = []*dra_fake.TestResourceSlice{
+		{Name: "old-node0", NodeName: "node0", PoolName: "cluster", Count: 1},
+		{Name: "old-node1", NodeName: "node1", PoolName: "cluster", Count: 1},
+		{Name: "current-global", AllNodes: true, PoolName: "cluster", Count: 1},
+	}
+	ssn := setupTestSession(t, topology, controller)
+	editSlices(t, ssn, func(slice *resourceapi.ResourceSlice) {
+		slice.Spec.Pool.ResourceSliceCount = 1
+		slice.Spec.AllNodes = nil
+		switch slice.Name {
+		case "old-node0":
+			slice.Spec.Pool.Generation = 1
+		case "old-node1":
+			slice.Spec.Pool.Generation = 2
+		case "current-global":
+			slice.Spec.Pool.Generation = 3
+			slice.Spec.NodeName = nil
+			slice.Spec.AllNodes = ptr.To(true)
+		}
+	})
+	allocate.New().Execute(ssn)
+	counts := pipelinedOn(ssn, "gang")
+	t.Logf("pipelined pods for the single cluster/0 device: %v", counts)
+	for _, task := range ssn.ClusterInfo.PodGroupInfos[common_info.NewPodGroupID("test", "gang")].GetAllPodsMap() {
+		if task.NodeName == "" {
+			continue
+		}
+		ready, err := ssn.IsTaskReadyForBinding(task, ssn.ClusterInfo.Nodes[task.NodeName])
+		require.NoError(t, err)
+		require.False(t, ready)
+	}
+	require.LessOrEqual(t, counts["node0"]+counts["node1"], 1, "a global exclusive device cannot be promised twice")
+}

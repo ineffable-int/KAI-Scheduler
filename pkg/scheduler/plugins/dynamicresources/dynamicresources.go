@@ -394,9 +394,16 @@ func (drap *draPlugin) ownClaims(claims []*resourceapi.ResourceClaim) bool {
 // exclusiveOnNode reports whether every allocated device is exclusive (not shared, no admin
 // access, no shared counters) and published by a ResourceSlice of the node itself.
 func exclusiveOnNode(results []resourceapi.AllocationResult, slices []*resourceapi.ResourceSlice, nodeName string) bool {
+	// Slices of older pool generations can linger; the allocator uses only the newest.
+	newest := map[string]int64{}
+	for _, slice := range slices {
+		pool := slice.Spec.Driver + "/" + slice.Spec.Pool.Name
+		newest[pool] = max(newest[pool], slice.Spec.Pool.Generation)
+	}
 	local := map[structured.DeviceID]bool{}
 	for _, slice := range slices {
-		if slice.Spec.NodeName == nil || *slice.Spec.NodeName != nodeName {
+		if slice.Spec.NodeName == nil || *slice.Spec.NodeName != nodeName ||
+			slice.Spec.Pool.Generation < newest[slice.Spec.Driver+"/"+slice.Spec.Pool.Name] {
 			continue
 		}
 		for _, device := range slice.Spec.Devices {
