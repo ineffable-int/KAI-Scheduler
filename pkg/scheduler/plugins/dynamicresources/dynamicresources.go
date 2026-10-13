@@ -324,16 +324,13 @@ func (drap *draPlugin) filter(task *pod_info.PodInfo, _ *podgroup_info.PodGroupI
 		return nil
 	}
 
-	if drap.pipelineOverReleasingClaims {
-		if err := drap.checkNoDRAWaiter(task, nodeInfo); err != nil {
-			return err
-		}
-	}
-
 	err := drap.checkAllocatable(nodeInfo, claimsToAllocate, false)
 	if err != nil && drap.pipelineOverReleasingClaims && !hasSpecialClaim && drap.ownClaims(claimsToAllocate) {
 		// The node fits if the only devices in the way are held by releasing pods. The task
 		// can then be pipelined there, and bindReady holds the bind until they are gone.
+		if waiterErr := drap.checkNoDRAWaiter(task, nodeInfo); waiterErr != nil {
+			return waiterErr
+		}
 		results, slices, relaxedErr := drap.allocationResults(nodeInfo.Node, claimsToAllocate, true)
 		if relaxedErr == nil && exclusiveOnNode(results, slices, nodeInfo.Name) {
 			log.InfraLogger.V(5).Do(func() {
@@ -346,10 +343,11 @@ func (drap *draPlugin) filter(task *pod_info.PodInfo, _ *podgroup_info.PodGroupI
 	return err
 }
 
-// checkNoDRAWaiter rejects a DRA placement on a node that already has a DRA waiter: a task
-// pipelined there whose claim is not allocated yet, because it waits for devices held by
-// releasing pods. Nothing records which releasing device such a task was promised, so at most
-// one waiter per node keeps a second task from being pipelined onto the same device. The
+// checkNoDRAWaiter rejects a placement over releasing devices on a node that already has a DRA
+// waiter: a task pipelined there whose claim is not allocated yet, because it waits for devices
+// held by releasing pods. Nothing records which releasing device such a task was promised, so
+// at most one waiter per node keeps a second task from being pipelined onto the same device.
+// A task that fits on free devices is not affected. The
 // waiter is derived from the node's pods and the claims, so it follows pipeline, rollback and
 // discard of the statement. This is the one place to change for per-device tracking, should
 // a node publish several such devices.
