@@ -402,7 +402,7 @@ func TestMultiNodeGangPreservesWholeGangVictims(t *testing.T) {
 	}
 }
 
-func newGeneratorTestSession(t *testing.T, nodeGPUs map[string]int) *framework.Session {
+func newGeneratorTestSession(t testing.TB, nodeGPUs map[string]int) *framework.Session {
 	t.Helper()
 
 	defaultQueue := createQueue("default")
@@ -419,7 +419,7 @@ func newGeneratorTestSession(t *testing.T, nodeGPUs map[string]int) *framework.S
 	}
 }
 
-func newGeneratorTestNodes(t *testing.T, nodeGPUs map[string]int) map[string]*node_info.NodeInfo {
+func newGeneratorTestNodes(t testing.TB, nodeGPUs map[string]int) map[string]*node_info.NodeInfo {
 	t.Helper()
 
 	resourceLists := make([]v1.ResourceList, 0, len(nodeGPUs))
@@ -553,7 +553,7 @@ func requireOneGPU() v1.ResourceRequirements {
 }
 
 func addGeneratorTestPendingJob(
-	t *testing.T, ssn *framework.Session, tasksPerJob int, jobID int, queueName string,
+	t testing.TB, ssn *framework.Session, tasksPerJob int, jobID int, queueName string,
 ) *podgroup_info.PodGroupInfo {
 	t.Helper()
 
@@ -564,7 +564,7 @@ func addGeneratorTestPendingJob(
 }
 
 func addGeneratorTestJob(
-	t *testing.T, ssn *framework.Session, tasksPerJob int, jobID int, queueName string, nodeNames ...string,
+	t testing.TB, ssn *framework.Session, tasksPerJob int, jobID int, queueName string, nodeNames ...string,
 ) (*podgroup_info.PodGroupInfo, []*pod_info.PodInfo) {
 	t.Helper()
 
