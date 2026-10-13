@@ -355,7 +355,7 @@ func (s *JobSolver) solvePartialJob(
 
 		validatorRejected := false
 		scenarioSolver := newByPodSolver(feasibleNodeMap, s.solutionValidatorWithMetrics(generatorName, &validatorRejected),
-			ssn.AllowConsolidatingReclaim(),
+			ssn.AllowConsolidatingReclaim(), ssn.PruneVictims(),
 			s.actionType)
 
 		log.InfraLogger.V(5).Do(func() {

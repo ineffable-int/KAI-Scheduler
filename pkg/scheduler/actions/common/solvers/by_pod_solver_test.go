@@ -19,7 +19,7 @@ func TestSolveRollsBackFeasibleNodeAdditionsOnValidatorRejection(t *testing.T) {
 	ssn, sn := newByPodSolverRollbackTestScenario(t)
 	feasibleNodes := map[string]*node_info.NodeInfo{}
 	rejectAll := func(api.ScenarioInfo) bool { return false }
-	solver := newByPodSolver(feasibleNodes, rejectAll, false, framework.Reclaim)
+	solver := newByPodSolver(feasibleNodes, rejectAll, false, true, framework.Reclaim)
 
 	result := solver.solve(ssn, sn)
 
@@ -32,7 +32,7 @@ func TestSolveRollsBackFeasibleNodeAdditionsOnValidatorRejection(t *testing.T) {
 // allocation failure.
 func TestSolveSolvesSameScenarioWithoutValidator(t *testing.T) {
 	ssn, sn := newByPodSolverRollbackTestScenario(t)
-	solver := newByPodSolver(map[string]*node_info.NodeInfo{}, nil, false, framework.Reclaim)
+	solver := newByPodSolver(map[string]*node_info.NodeInfo{}, nil, false, true, framework.Reclaim)
 
 	result := solver.solve(ssn, sn)
 

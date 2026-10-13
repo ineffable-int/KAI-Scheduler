@@ -43,6 +43,7 @@ type byPodSolver struct {
 	feasibleNodes            map[string]*node_info.NodeInfo
 	solutionValidator        SolutionValidator
 	allowVictimConsolidation bool
+	pruneVictims             bool
 	actionType               framework.ActionType
 }
 
@@ -50,12 +51,14 @@ func newByPodSolver(
 	feasibleNodes map[string]*node_info.NodeInfo,
 	checkVictims SolutionValidator,
 	allowVictimConsolidation bool,
+	pruneVictims bool,
 	action framework.ActionType,
 ) *byPodSolver {
 	return &byPodSolver{
 		feasibleNodes:            feasibleNodes,
 		solutionValidator:        checkVictims,
 		allowVictimConsolidation: allowVictimConsolidation,
+		pruneVictims:             pruneVictims,
 		actionType:               action,
 	}
 }
@@ -77,6 +80,11 @@ func (s *byPodSolver) solve(session *framework.Session, scenario *scenario.ByNod
 		return &solutionResult{false, nil, nil, nil}
 	}
 
+	originalNodes := make(map[common_info.PodID]string, len(allVictims))
+	for _, victim := range allVictims {
+		originalNodes[victim.UID] = victim.NodeName
+	}
+
 	checkpoint := statement.Checkpoint()
 	if err := common.EvictAllPreemptees(session, allVictims, pendingJob, statement, s.actionType); err != nil {
 		return handleSolveError(pendingJob, nextTaskToFindAllocation, err, statement)
@@ -85,6 +93,11 @@ func (s *byPodSolver) solve(session *framework.Session, scenario *scenario.ByNod
 
 	result := s.runSimulation(session, scenario, statement, allVictims, maps.Values(s.feasibleNodes))
 	if result != nil {
+		if result.solved && s.pruneVictims {
+			if pruned := s.pruneSolution(session, scenario, statement, allVictims, originalNodes); pruned != nil {
+				result = pruned
+			}
+		}
 		// Roll back on validator-rejected and error results too: the map is
 		// shared across the probe's scenarios and must stay derived from the
 		// solver's node set plus the recorded victims.
@@ -111,6 +124,94 @@ func (s *byPodSolver) runSimulation(
 		return s.handleScenarioSolution(scenario, statement, solutionVictims)
 	}
 	return nil
+}
+
+// pruneSolution keeps only the victim batches (a whole gang, or one pod of an elastic job)
+// with a pod on a node where the simulation placed a preemptor task. The other batches free
+// nothing the preemptor uses, yet they are still deleted on commit: the simulation either
+// re-placed them on another node (Pipelined, which does not move the pod) or could not
+// re-place them. The kept batches are re-simulated and the original solution is rebuilt if
+// that fails. Returns nil when there is nothing to prune.
+func (s *byPodSolver) pruneSolution(
+	session *framework.Session, sc *scenario.ByNodeScenario, statement *framework.Statement,
+	allVictims []*pod_info.PodInfo, originalNodes map[common_info.PodID]string,
+) *solutionResult {
+	preemptorNodes := map[string]bool{}
+	preemptorUID := sc.GetPreemptor().UID
+	for nodeName, node := range s.feasibleNodes {
+		if node == nil {
+			continue
+		}
+		for _, task := range node.PodInfos {
+			if task.Job == preemptorUID &&
+				(task.Status == pod_status.Pipelined || task.Status == pod_status.Allocated) {
+				preemptorNodes[nodeName] = true
+				break
+			}
+		}
+	}
+	if len(preemptorNodes) == 0 {
+		return nil
+	}
+
+	type batch struct{ tasks []*pod_info.PodInfo }
+	batches := map[*podgroup_info.PodGroupInfo]*batch{}
+	var batchOrder []*podgroup_info.PodGroupInfo
+	keep := map[*podgroup_info.PodGroupInfo]bool{}
+	for _, victim := range allVictims {
+		rep := sc.GetVictimJobRepresentativeById(victim)
+		if rep == nil {
+			return nil
+		}
+		if _, found := batches[rep]; !found {
+			batches[rep] = &batch{}
+			batchOrder = append(batchOrder, rep)
+		}
+		batches[rep].tasks = append(batches[rep].tasks, victim)
+		if preemptorNodes[originalNodes[victim.UID]] {
+			keep[rep] = true
+		}
+	}
+	var keptBatches [][]*pod_info.PodInfo
+	var keptTasks []*pod_info.PodInfo
+	for _, rep := range batchOrder {
+		if keep[rep] {
+			keptBatches = append(keptBatches, batches[rep].tasks)
+			keptTasks = append(keptTasks, batches[rep].tasks...)
+		}
+	}
+	if len(keptTasks) == 0 || len(keptTasks) == len(allVictims) {
+		return nil
+	}
+
+	pendingJob := sc.GetPreemptor()
+	nextTask := sc.PendingTasks()[len(sc.PendingTasks())-1]
+	nodes := maps.Values(s.feasibleNodes)
+
+	statement.Discard()
+	// AddPotentialVictimsTasks clones the tasks, so build the scenario after the discard
+	// for the clones to carry their pre-simulation node and status.
+	pruned := scenario.NewByNodeScenario(session, sc.GetPreemptor(), sc.PendingTasks(), nil, nil)
+	for _, tasks := range keptBatches {
+		pruned.AddPotentialVictimsTasks(tasks)
+	}
+	if err := common.EvictAllPreemptees(session, keptTasks, pendingJob, statement, s.actionType); err == nil {
+		if result := s.runSimulation(session, pruned, statement, keptTasks, nodes); result != nil && result.solved {
+			log.InfraLogger.V(4).Infof("Pruned victims for <%s/%s>: %d -> %d",
+				pendingJob.Namespace, pendingJob.Name, len(allVictims), len(keptTasks))
+			return result
+		}
+	}
+
+	statement.Discard()
+	if err := common.EvictAllPreemptees(session, allVictims, pendingJob, statement, s.actionType); err != nil {
+		return handleSolveError(pendingJob, nextTask, err, statement)
+	}
+	if result := s.runSimulation(session, sc, statement, allVictims, nodes); result != nil {
+		return result
+	}
+	statement.Discard()
+	return &solutionResult{false, nil, nil, nil}
 }
 
 func (s *byPodSolver) feasibleNodesRollback(newFeasibleNodes map[string]bool) {

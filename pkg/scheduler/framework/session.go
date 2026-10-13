@@ -599,6 +599,17 @@ func (ssn *Session) AllowConsolidatingReclaim() bool {
 	return ssn.SchedulerParams.AllowConsolidatingReclaim
 }
 
+// PruneVictims reports whether solved eviction scenarios drop victims that free no node the
+// preemptor is placed on.
+func (ssn *Session) PruneVictims() bool {
+	return !ssn.SchedulerParams.DisableVictimPruning
+}
+
+// OverridePruneVictims overrides the value returned by PruneVictims. Use for testing purposes.
+func (ssn *Session) OverridePruneVictims(pruneVictims bool) {
+	ssn.SchedulerParams.DisableVictimPruning = !pruneVictims
+}
+
 func (ssn *Session) GetGlobalDefaultStalenessGracePeriod() time.Duration {
 	return ssn.SchedulerParams.GlobalDefaultStalenessGracePeriod
 }

@@ -103,10 +103,15 @@ func nodeLocalScenarios(session *framework.Session, base *scenario.ByNodeScenari
 		return []*scenario.ByNodeScenario{base}
 	}
 
+	recorded := map[common_info.PodID]bool{}
+	for _, task := range base.RecordedVictimsTasks() {
+		recorded[task.UID] = true
+	}
+
 	var scenarios []*scenario.ByNodeScenario
 	seen := map[string]struct{}{}
 	for _, nodeName := range nodeNamesOfJob(base.LatestPotentialVictim()) {
-		victimTasks := base.VictimsTasksFromNodes([]string{nodeName})
+		victimTasks := nodeLocalVictimTasks(base, nodeName, recorded)
 		if len(victimTasks) == 0 {
 			continue
 		}
@@ -126,6 +131,31 @@ func nodeLocalScenarios(session *framework.Session, base *scenario.ByNodeScenari
 		scenarios = append(scenarios, sn)
 	}
 	return scenarios
+}
+
+// nodeLocalVictimTasks returns the victim batches (a whole gang, or one pod of an elastic
+// job) with a pod on nodeName, not every batch of a job with a pod there: for an elastic job
+// that would be its pods on all nodes. Recorded victims are already in the scenario and are
+// skipped.
+func nodeLocalVictimTasks(
+	base *scenario.ByNodeScenario, nodeName string, recorded map[common_info.PodID]bool,
+) []*pod_info.PodInfo {
+	var out []*pod_info.PodInfo
+	for _, batch := range base.VictimBatchesFromNodes([]string{nodeName}) {
+		onNode := false
+		kept := batch[:0] // batch is a fresh slice
+		for _, task := range batch {
+			if recorded[task.UID] {
+				continue
+			}
+			kept = append(kept, task)
+			onNode = onNode || task.NodeName == nodeName
+		}
+		if onNode {
+			out = append(out, kept...)
+		}
+	}
+	return out
 }
 
 func nodeNamesOfJob(job *podgroup_info.PodGroupInfo) []string {

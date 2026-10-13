@@ -5,6 +5,7 @@ package status_updater
 
 import (
 	"context"
+	"time"
 
 	v1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -16,7 +17,13 @@ import (
 	"github.com/kai-scheduler/KAI-scheduler/pkg/scheduler/log"
 )
 
+const (
+	podGroupRetryBaseDelay = 50 * time.Millisecond
+	podGroupRetryMaxDelay  = 10 * time.Second
+)
+
 func (su *defaultStatusUpdater) Run(stopCh <-chan struct{}) {
+	su.stopCh = stopCh
 	for i := 0; i < su.numberOfWorkers; i++ {
 		go su.updateWorker(stopCh)
 	}
@@ -110,7 +117,7 @@ func (su *defaultStatusUpdater) updatePodGroup(
 	if len(updateData.patchData) > 0 {
 		var patched *enginev2alpha2.PodGroup
 		patched, patchErr = su.kaiClient.SchedulingV2alpha2().PodGroups(podGroup.Namespace).Patch(
-			ctx, podGroup.Name, types.JSONPatchType, updateData.patchData, metav1.PatchOptions{}, updateData.subResources...,
+			ctx, podGroup.Name, types.MergePatchType, updateData.patchData, metav1.PatchOptions{}, updateData.subResources...,
 		)
 		if patchErr == nil {
 			updateData.writtenResourceVersions = append(updateData.writtenResourceVersions, patched.ResourceVersion)
@@ -143,16 +150,14 @@ func (su *defaultStatusUpdater) updatePodGroup(
 		if patchErr != nil {
 			log.StatusUpdaterLogger.V(1).Errorf("Failed to patch pod group %s/%s: %v",
 				podGroup.Namespace, podGroup.Name, patchErr)
+			if apierrors.IsInvalid(patchErr) || apierrors.IsBadRequest(patchErr) {
+				// Resending the same patch cannot succeed; the next scheduling cycle builds a new one.
+				su.inFlightPodGroups.CompareAndDelete(key, updateData)
+				return
+			}
 		}
 
-		su.pushToUpdateQueue(
-			&updatePayload{
-				key:        key,
-				objectType: podGroupType,
-			},
-			updateData,
-		)
-
+		su.retryPodGroupUpdate(key, updateData)
 		return
 	}
 
@@ -167,6 +172,24 @@ func (su *defaultStatusUpdater) updatePodGroup(
 // isTerminalUpdateError reports whether an update error can never succeed on retry.
 func isTerminalUpdateError(err error) bool {
 	return apierrors.IsNotFound(err) || apierrors.IsConflict(err)
+}
+
+// retryPodGroupUpdate requeues a failed update after an exponential backoff, unless a newer
+// update for the same pod group replaced it in the meantime or the updater has stopped.
+func (su *defaultStatusUpdater) retryPodGroupUpdate(key updatePayloadKey, updateData *inflightUpdate) {
+	delay := podGroupRetryMaxDelay
+	if retries := updateData.retries.Add(1) - 1; retries < 16 {
+		delay = min(podGroupRetryBaseDelay<<retries, podGroupRetryMaxDelay)
+	}
+	su.afterFunc(delay, func() {
+		if current, found := su.inFlightPodGroups.Load(key); !found || current != updateData {
+			return
+		}
+		select {
+		case su.updateQueueIn <- &updatePayload{key: key, objectType: podGroupType}:
+		case <-su.stopCh:
+		}
+	})
 }
 
 func (su *defaultStatusUpdater) updateInFlightObject(key updatePayloadKey, objectType string, object *inflightUpdate) {

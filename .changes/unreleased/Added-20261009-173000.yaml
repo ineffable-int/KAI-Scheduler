@@ -1,0 +1,3 @@
+kind: Added
+body: 'Scheduler flag `--prune-victims` (default true); `--prune-victims=false` switches off pruning of victims that free no preemptor node'
+time: 2026-10-09T17:30:00.000000000Z

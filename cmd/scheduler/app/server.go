@@ -106,6 +106,7 @@ func BuildSchedulerParams(opt *options.ServerOption) *conf.SchedulerParams {
 		UseSchedulingSignatures:           opt.UseSchedulingSignatures,
 		FullHierarchyFairness:             opt.FullHierarchyFairness,
 		AllowConsolidatingReclaim:         opt.AllowConsolidatingReclaim,
+		DisableVictimPruning:              !opt.PruneVictims,
 		NumOfStatusRecordingWorkers:       opt.NumOfStatusRecordingWorkers,
 		GlobalDefaultStalenessGracePeriod: opt.GlobalDefaultStalenessGracePeriod,
 		SchedulePeriod:                    opt.SchedulePeriod,
