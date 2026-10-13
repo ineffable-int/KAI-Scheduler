@@ -289,3 +289,27 @@ func TestPipelineOverReleasingClaims_OnlyCurrentSlicesCountAsLocal(t *testing.T)
 	}
 	require.LessOrEqual(t, counts["node0"]+counts["node1"], 1, "a global exclusive device cannot be promised twice")
 }
+
+// A claim that needs a device held by a releasing pod and a free device cannot be pipelined:
+// its claim stays unallocated while it waits, so nothing reserves the free device, and a
+// later, lower-priority pod could take it and leave the waiter unable to bind.
+func TestPipelineOverReleasingClaims_MixedClaimStaysStrict(t *testing.T) {
+	test_utils.InitTestingInfrastructure()
+	topology := releasingClaimTopology(t, pod_status.Releasing, true, 1)
+	topology.TestDRAObjects.ResourceSlices[0].Count = 2 // device 0 held by the holder, device 1 free
+	topology.TestDRAObjects.ResourceClaims[1].Count = 2 // the pending pod needs both
+	topology.Jobs[1].Priority = 100
+	topology.Jobs = append(topology.Jobs, &jobs_fake.TestJobBasic{
+		Name: "later", Namespace: "test", QueueName: "q-1", Priority: 10,
+		Tasks: []*tasks_fake.TestTaskBasic{{State: pod_status.Pending, ResourceClaimNames: []string{"later-channel"}}},
+	})
+	topology.TestDRAObjects.ResourceClaims = append(topology.TestDRAObjects.ResourceClaims,
+		&dra_fake.TestResourceClaim{Name: "later-channel", Namespace: "test", DeviceClassName: channelClass, Count: 1})
+	ssn := setupTestSession(t, topology, gomock.NewController(t))
+
+	allocate.New().Execute(ssn)
+
+	for _, task := range ssn.ClusterInfo.PodGroupInfos[common_info.NewPodGroupID("test", "pending")].GetAllPodsMap() {
+		require.Equal(t, pod_status.Pending, task.Status, "a waiter for one held and one free device cannot keep the free one")
+	}
+}

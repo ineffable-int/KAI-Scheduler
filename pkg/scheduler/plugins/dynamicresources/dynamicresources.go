@@ -339,7 +339,7 @@ func (drap *draPlugin) filter(task *pod_info.PodInfo, _ *podgroup_info.PodGroupI
 			return waiterErr
 		}
 		results, slices, relaxedErr := drap.allocationResults(nodeInfo.Node, claimsToAllocate, true)
-		if relaxedErr == nil && exclusiveOnNode(results, slices, nodeInfo.Name) {
+		if relaxedErr == nil && exclusiveOnNode(results, slices, nodeInfo.Name) && !drap.mixesHeldAndFreeDevices(results) {
 			log.InfraLogger.V(5).Do(func() {
 				log.InfraLogger.Infof("Task <%s/%s> fits node %s over DRA devices held by releasing pods",
 					task.Namespace, task.Name, nodeInfo.Name)
@@ -506,6 +506,30 @@ func (drap *draPlugin) withoutReleasingDevices(state *structured.AllocatedState)
 		}
 	}
 	return &out, nil
+}
+
+// mixesHeldAndFreeDevices reports whether one claim's result takes both a device held by a
+// releasing pod and a free device. The claim stays unallocated while the task waits, so
+// nothing would reserve the free device for it. Errors count as mixed.
+func (drap *draPlugin) mixesHeldAndFreeDevices(results []resourceapi.AllocationResult) bool {
+	state, err := drap.manager.ResourceClaims().GatherAllocatedState()
+	if err != nil {
+		return true
+	}
+	for _, result := range results {
+		held, free := false, false
+		for _, device := range result.Devices.Results {
+			if state.AllocatedDevices.Has(structured.MakeDeviceID(device.Driver, device.Pool, device.Device)) {
+				held = true
+			} else {
+				free = true
+			}
+		}
+		if held && free {
+			return true
+		}
+	}
+	return false
 }
 
 // indexSessionPods maps the pods of all PodGroups and all pods on nodes, including pods
