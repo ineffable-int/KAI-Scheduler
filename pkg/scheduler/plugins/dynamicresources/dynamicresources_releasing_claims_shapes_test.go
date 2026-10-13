@@ -152,3 +152,36 @@ func TestPipelineOverReleasingClaims_WaiterDoesNotBlockOtherDevices(t *testing.T
 		}
 	}
 }
+
+// A pod that also uses an existing claim held only by releasing pods needs that claim's
+// device. The relaxed check must not free it for the pod's other claim.
+func TestPipelineOverReleasingClaims_ReusedReleasingClaimStaysStrict(t *testing.T) {
+	test_utils.InitTestingInfrastructure()
+	for _, on := range []bool{false, true} {
+		t.Run(fmt.Sprintf("argument=%t", on), func(t *testing.T) {
+			topology := releasingClaimTopology(t, pod_status.Releasing, on, 0)
+			topology.Jobs[1].Tasks[0].ResourceClaimNames = []string{"holder-channel", "pending-channel"}
+			ssn := setupTestSession(t, topology, gomock.NewController(t))
+			job := ssn.ClusterInfo.PodGroupInfos[common_info.NewPodGroupID("test", "pending")]
+			task := getTaskByStatus(t, ssn, "pending", pod_status.Pending)
+			node := ssn.ClusterInfo.Nodes["node0"]
+			require.NoError(t, ssn.PrePredicateFn(task, job))
+			err := ssn.PredicateFn(task, job, node)
+			t.Logf("one device, two exclusive claims needed by the same pod: filter error=%v", err)
+			if err == nil {
+				stmt := ssn.Statement()
+				cp := stmt.Checkpoint()
+				require.NoError(t, stmt.Pipeline(task, "node0", false))
+				claim, getErr := ssn.InternalK8sPlugins().SessionDRAManager.ResourceClaims().Get("test", "holder-channel")
+				require.NoError(t, getErr)
+				require.Len(t, claim.Status.ReservedFor, 2)
+				ready, checkErr := ssn.IsTaskReadyForBinding(task, node)
+				require.NoError(t, checkErr)
+				require.False(t, ready)
+				require.NoError(t, stmt.Rollback(cp))
+				require.Equal(t, pod_status.Pending, task.Status)
+			}
+			require.Error(t, err, "the pod still needs holder-channel, so that device cannot satisfy pending-channel")
+		})
+	}
+}

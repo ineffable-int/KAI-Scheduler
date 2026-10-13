@@ -279,6 +279,9 @@ func (drap *draPlugin) filter(task *pod_info.PodInfo, _ *podgroup_info.PodGroupI
 
 	var claimsToAllocate []*resourceapi.ResourceClaim
 	hasSpecialClaim := false
+	// The relaxed check frees the devices of claims held only by releasing pods; a pod that
+	// uses such a claim itself still needs its device.
+	usesReleasingClaim := false
 	for _, podClaim := range pod.Spec.ResourceClaims {
 		claimName, err := resources.GetResourceClaimName(pod, &podClaim)
 		if err != nil {
@@ -291,6 +294,9 @@ func (drap *draPlugin) filter(task *pod_info.PodInfo, _ *podgroup_info.PodGroupI
 		}
 
 		if claim.Status.Allocation != nil {
+			if drap.pipelineOverReleasingClaims && drap.reservedOnlyForReleasingPods(claim) {
+				usesReleasingClaim = true
+			}
 			if claim.Status.Allocation.NodeSelector != nil {
 				ns, err := nodeaffinity.NewNodeSelector(claim.Status.Allocation.NodeSelector)
 				if err != nil {
@@ -325,7 +331,8 @@ func (drap *draPlugin) filter(task *pod_info.PodInfo, _ *podgroup_info.PodGroupI
 	}
 
 	err := drap.checkAllocatable(nodeInfo, claimsToAllocate, false)
-	if err != nil && drap.pipelineOverReleasingClaims && !hasSpecialClaim && drap.ownClaims(claimsToAllocate) {
+	if err != nil && drap.pipelineOverReleasingClaims && !hasSpecialClaim && !usesReleasingClaim &&
+		drap.ownClaims(claimsToAllocate) {
 		// The node fits if the only devices in the way are held by releasing pods. The task
 		// can then be pipelined there, and bindReady holds the bind until they are gone.
 		if waiterErr := drap.checkNoDRAWaiter(task, nodeInfo); waiterErr != nil {
