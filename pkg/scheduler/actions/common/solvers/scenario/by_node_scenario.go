@@ -68,6 +68,18 @@ func (bns *ByNodeScenario) VictimsTasksFromNodes(nodeNames []string) []*pod_info
 	return tasks
 }
 
+// VictimBatchesFromNodes returns the potential victim batches (the task groups added
+// together) of every job with a potential victim on one of the nodes.
+func (bns *ByNodeScenario) VictimBatchesFromNodes(nodeNames []string) [][]*pod_info.PodInfo {
+	var batches [][]*pod_info.PodInfo
+	for _, jobID := range bns.potentialVictimsJobsFromNodes(nodeNames) {
+		for _, jobTaskGroup := range bns.victimsJobsTaskGroups[jobID] {
+			batches = append(batches, maps.Values(jobTaskGroup.GetAllPodsMap()))
+		}
+	}
+	return batches
+}
+
 func (bns *ByNodeScenario) potentialVictimsJobsFromNodes(nodeNames []string) []common_info.PodGroupID {
 	victimsJobs := map[common_info.PodGroupID]bool{}
 	for _, node := range nodeNames {
