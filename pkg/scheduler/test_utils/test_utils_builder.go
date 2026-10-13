@@ -36,6 +36,7 @@ import (
 	"github.com/kai-scheduler/KAI-scheduler/pkg/scheduler/log"
 	"github.com/kai-scheduler/KAI-scheduler/pkg/scheduler/plugins"
 	"github.com/kai-scheduler/KAI-scheduler/pkg/scheduler/plugins/numa"
+	"github.com/kai-scheduler/KAI-scheduler/pkg/scheduler/test_utils/dra_fake"
 	"github.com/kai-scheduler/KAI-scheduler/pkg/scheduler/test_utils/jobs_fake"
 	"github.com/kai-scheduler/KAI-scheduler/pkg/scheduler/test_utils/nodes_fake"
 )
@@ -446,9 +447,15 @@ func getResourceClaims(testMetadata TestTopologyBasic) []*resourceapi.ResourceCl
 }
 
 func getResourceSlices(testMetadata TestTopologyBasic) []*resourceapi.ResourceSlice {
+	poolName := func(slice *dra_fake.TestResourceSlice) string {
+		if slice.PoolName != "" {
+			return slice.PoolName
+		}
+		return slice.NodeName
+	}
 	poolSliceCounts := map[string]int64{}
 	for _, resourceSlice := range testMetadata.ResourceSlices {
-		poolSliceCounts[resourceSlice.NodeName]++
+		poolSliceCounts[poolName(resourceSlice)]++
 	}
 
 	var objects []*resourceapi.ResourceSlice
@@ -465,8 +472,8 @@ func getResourceSlices(testMetadata TestTopologyBasic) []*resourceapi.ResourceSl
 			Spec: resourceapi.ResourceSliceSpec{
 				Driver: "nvidia.com/gpu",
 				Pool: resourceapi.ResourcePool{
-					Name:               resourceSlice.NodeName,
-					ResourceSliceCount: poolSliceCounts[resourceSlice.NodeName],
+					Name:               poolName(resourceSlice),
+					ResourceSliceCount: poolSliceCounts[poolName(resourceSlice)],
 				},
 				NodeSelector: resourceSlice.NodeSelector,
 				NodeName:     ptr.To(resourceSlice.NodeName),
