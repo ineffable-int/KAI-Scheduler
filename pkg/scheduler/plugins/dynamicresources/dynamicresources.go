@@ -52,6 +52,9 @@ type draPlugin struct {
 	// podsByUID maps the session's pods by UID, to find claims whose consumers are all
 	// releasing. Set only when pipelineOverReleasingClaims is on.
 	podsByUID map[types.UID]*pod_info.PodInfo
+	// claimUsers counts the session's pods that reference each claim ("namespace/name"), to
+	// tell a pod's own claims from shared ones. Set only when pipelineOverReleasingClaims is on.
+	claimUsers map[string]int
 }
 
 // +kubebuilder:rbac:groups="resource.k8s.io",resources=deviceclasses;resourceslices;resourceclaims,verbs=get;list;watch
@@ -120,11 +123,18 @@ func (drap *draPlugin) OnSessionOpen(ssn *framework.Session) {
 	ssn.AddPredicateFn(drap.filter)
 
 	drap.podsByUID = nil
+	drap.claimUsers = nil
 	if drap.pipelineOverReleasingClaims && drap.manager != nil {
 		drap.podsByUID = map[types.UID]*pod_info.PodInfo{}
+		drap.claimUsers = map[string]int{}
 		for _, podGroup := range ssn.ClusterInfo.PodGroupInfos {
 			for _, pod := range podGroup.GetAllPodsMap() {
 				drap.podsByUID[pod.Pod.UID] = pod
+				for _, podClaim := range pod.Pod.Spec.ResourceClaims {
+					if claimName, err := resources.GetResourceClaimName(pod.Pod, &podClaim); err == nil {
+						drap.claimUsers[pod.Namespace+"/"+claimName]++
+					}
+				}
 			}
 		}
 		ssn.AddBindReadyFn(drap.bindReady)
@@ -262,6 +272,7 @@ func (drap *draPlugin) filter(task *pod_info.PodInfo, _ *podgroup_info.PodGroupI
 	}
 
 	var claimsToAllocate []*resourceapi.ResourceClaim
+	hasSpecialClaim := false
 	for _, podClaim := range pod.Spec.ResourceClaims {
 		claimName, err := resources.GetResourceClaimName(pod, &podClaim)
 		if err != nil {
@@ -299,6 +310,7 @@ func (drap *draPlugin) filter(task *pod_info.PodInfo, _ *podgroup_info.PodGroupI
 			specialClaim := buildSpecialClaim(pod)
 			specialClaim.Spec.Devices.Requests = deviceRequests
 			claimsToAllocate = append(claimsToAllocate, specialClaim)
+			hasSpecialClaim = true
 		}
 	}
 
@@ -306,11 +318,18 @@ func (drap *draPlugin) filter(task *pod_info.PodInfo, _ *podgroup_info.PodGroupI
 		return nil
 	}
 
+	if drap.pipelineOverReleasingClaims {
+		if err := drap.checkNoDRAWaiter(task, nodeInfo); err != nil {
+			return err
+		}
+	}
+
 	err := drap.checkAllocatable(nodeInfo, claimsToAllocate, false)
-	if err != nil && drap.pipelineOverReleasingClaims {
+	if err != nil && drap.pipelineOverReleasingClaims && !hasSpecialClaim && drap.ownClaims(claimsToAllocate) {
 		// The node fits if the only devices in the way are held by releasing pods. The task
 		// can then be pipelined there, and bindReady holds the bind until they are gone.
-		if drap.checkAllocatable(nodeInfo, claimsToAllocate, true) == nil {
+		results, slices, relaxedErr := drap.allocationResults(nodeInfo, claimsToAllocate, true)
+		if relaxedErr == nil && exclusiveOnNode(results, slices, nodeInfo.Name) {
 			log.InfraLogger.V(5).Do(func() {
 				log.InfraLogger.Infof("Task <%s/%s> fits node %s over DRA devices held by releasing pods",
 					task.Namespace, task.Name, nodeInfo.Name)
@@ -321,24 +340,97 @@ func (drap *draPlugin) filter(task *pod_info.PodInfo, _ *podgroup_info.PodGroupI
 	return err
 }
 
+// checkNoDRAWaiter rejects a DRA placement on a node that already has a DRA waiter: a task
+// pipelined there whose claim is not allocated yet, because it waits for devices held by
+// releasing pods. Nothing records which releasing device such a task was promised, so at most
+// one waiter per node keeps a second task from being pipelined onto the same device. The
+// waiter is derived from the node's pods and the claims, so it follows pipeline, rollback and
+// discard of the statement. This is the one place to change for per-device tracking, should
+// a node publish several such devices.
+func (drap *draPlugin) checkNoDRAWaiter(task *pod_info.PodInfo, nodeInfo *node_info.NodeInfo) error {
+	for _, pod := range nodeInfo.PodInfos {
+		if pod.UID == task.UID || pod.Status != pod_status.Pipelined {
+			continue
+		}
+		for _, podClaim := range pod.Pod.Spec.ResourceClaims {
+			claimName, err := resources.GetResourceClaimName(pod.Pod, &podClaim)
+			if err != nil {
+				return err
+			}
+			claim, err := drap.manager.ResourceClaims().Get(pod.Namespace, claimName)
+			if err != nil {
+				return fmt.Errorf("failed to get resource claim %s/%s: %v", pod.Namespace, claimName, err)
+			}
+			if claim.Status.Allocation == nil {
+				return fmt.Errorf("pod %s/%s is pipelined on node %s waiting for DRA devices held by releasing pods",
+					pod.Namespace, pod.Name, nodeInfo.Name)
+			}
+		}
+	}
+	return nil
+}
+
+// ownClaims reports whether no other pod in the session references any of claims.
+func (drap *draPlugin) ownClaims(claims []*resourceapi.ResourceClaim) bool {
+	for _, claim := range claims {
+		if drap.claimUsers[claim.Namespace+"/"+claim.Name] > 1 {
+			return false
+		}
+	}
+	return true
+}
+
+// exclusiveOnNode reports whether every allocated device is exclusive (not shared, no admin
+// access) and published by a ResourceSlice of the node itself.
+func exclusiveOnNode(results []resourceapi.AllocationResult, slices []*resourceapi.ResourceSlice, nodeName string) bool {
+	local := map[structured.DeviceID]bool{}
+	for _, slice := range slices {
+		if slice.Spec.NodeName == nil || *slice.Spec.NodeName != nodeName {
+			continue
+		}
+		for _, device := range slice.Spec.Devices {
+			local[structured.MakeDeviceID(slice.Spec.Driver, slice.Spec.Pool.Name, device.Name)] = true
+		}
+	}
+	for _, result := range results {
+		for _, device := range result.Devices.Results {
+			if device.ShareID != nil || len(device.ConsumedCapacity) > 0 ||
+				(device.AdminAccess != nil && *device.AdminAccess) ||
+				!local[structured.MakeDeviceID(device.Driver, device.Pool, device.Device)] {
+				return false
+			}
+		}
+	}
+	return true
+}
+
 // checkAllocatable reports whether claims can be allocated on node. With overReleasing, the
 // devices of claims whose consumers are all releasing pods count as free.
 func (drap *draPlugin) checkAllocatable(
 	nodeInfo *node_info.NodeInfo, claims []*resourceapi.ResourceClaim, overReleasing bool,
 ) error {
+	_, _, err := drap.allocationResults(nodeInfo, claims, overReleasing)
+	return err
+}
+
+// allocationResults allocates claims on node without recording the result, and returns the
+// results with the slices they were taken from.
+func (drap *draPlugin) allocationResults(
+	nodeInfo *node_info.NodeInfo, claims []*resourceapi.ResourceClaim, overReleasing bool,
+) ([]resourceapi.AllocationResult, []*resourceapi.ResourceSlice, error) {
 	allocatedState, err := drap.manager.ResourceClaims().GatherAllocatedState()
 	if err != nil {
-		return fmt.Errorf("failed to gather allocated device state: %v", err)
+		return nil, nil, fmt.Errorf("failed to gather allocated device state: %v", err)
 	}
 	if overReleasing {
 		if allocatedState, err = drap.withoutReleasingDevices(allocatedState); err != nil {
-			return err
+			return nil, nil, err
 		}
 	}
 
 	slices, err := drap.manager.ResourceSlices().ListWithDeviceTaintRules()
 	if err != nil {
-		return fmt.Errorf("failed to list resource slices: %v", err)
+		return nil, nil, fmt.Errorf("failed to list resource slices: %v", err)
 	}
 
 	allocator, err := structured.NewAllocator(
@@ -349,18 +441,18 @@ func (drap *draPlugin) checkAllocatable(
 		drap.celCache,
 	)
 	if err != nil {
-		return fmt.Errorf("failed to create allocator: %v", err)
+		return nil, nil, fmt.Errorf("failed to create allocator: %v", err)
 	}
 
 	results, err := allocator.Allocate(context.Background(), nodeInfo.Node, claims)
 	if err != nil {
-		return fmt.Errorf("cannot allocate DRA claims on node %s: %v", nodeInfo.Name, err)
+		return nil, nil, fmt.Errorf("cannot allocate DRA claims on node %s: %v", nodeInfo.Name, err)
 	}
 	if len(results) != len(claims) {
-		return fmt.Errorf("cannot allocate all DRA claims on node %s", nodeInfo.Name)
+		return nil, nil, fmt.Errorf("cannot allocate all DRA claims on node %s", nodeInfo.Name)
 	}
 
-	return nil
+	return results, slices, nil
 }
 
 // withoutReleasingDevices returns a copy of state without the exclusively allocated devices
