@@ -23,6 +23,7 @@ import (
 	"fmt"
 
 	v1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/types"
 
 	kaiv1alpha1 "github.com/kai-scheduler/KAI-scheduler/pkg/apis/kai/v1alpha1"
 	"github.com/kai-scheduler/KAI-scheduler/pkg/scheduler/api/bindrequest_info"
@@ -69,6 +70,11 @@ type ClusterInfo struct {
 	// DeviceClassByResource resolves an extended resource name to the DeviceClass that backs it.
 	// Built each scheduling session from the DeviceClasses snapshot.
 	DeviceClassByResource *extendedresourcecache.ExtendedResourceCache
+
+	// PodPhases holds the phase of every pod the snapshot listed, including pods that are on
+	// no node and in no PodGroup. The pod informer leaves out Failed pods, so a UID missing
+	// from it belongs to a pod that is deleted or Failed.
+	PodPhases map[types.UID]v1.PodPhase
 }
 
 func NewClusterInfo() *ClusterInfo {
