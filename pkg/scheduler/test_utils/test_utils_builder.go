@@ -83,7 +83,6 @@ func CreateFakeSession(schedulerConfig *TestSessionConfig,
 	}
 	ssn.OverrideMaxNumberConsolidationPreemptees(-1)
 	ssn.OverrideAllowConsolidatingReclaim(true)
-	ssn.OverridePruneVictims(true)
 	ssn.OverrideSchedulerName(schedulerName)
 
 	if controller != nil || createCacheMockIfNotExists {
