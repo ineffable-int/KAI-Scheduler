@@ -23,6 +23,7 @@ import (
 	featuregates "github.com/kai-scheduler/KAI-scheduler/pkg/common/feature_gates"
 	"github.com/kai-scheduler/KAI-scheduler/pkg/common/k8s_utils"
 	"github.com/kai-scheduler/KAI-scheduler/pkg/common/resources"
+	"github.com/kai-scheduler/KAI-scheduler/pkg/scheduler/api/common_info"
 	"github.com/kai-scheduler/KAI-scheduler/pkg/scheduler/api/node_info"
 	"github.com/kai-scheduler/KAI-scheduler/pkg/scheduler/api/pod_info"
 	"github.com/kai-scheduler/KAI-scheduler/pkg/scheduler/api/pod_status"
@@ -49,8 +50,9 @@ type draPlugin struct {
 	deviceClassByResource *extendedresourcecache.ExtendedResourceCache
 
 	pipelineOverReleasingClaims bool
-	// podsByUID maps the session's pods by UID, to find claims whose consumers are all
-	// releasing. Set only when pipelineOverReleasingClaims is on.
+	// podsByUID maps every pod the session knows by UID (PodGroup pods and all pods on nodes),
+	// to find claims whose consumers are all releasing. Set only when
+	// pipelineOverReleasingClaims is on.
 	podsByUID map[types.UID]*pod_info.PodInfo
 	// claimUsers counts the session's pods that reference each claim ("namespace/name"), to
 	// tell a pod's own claims from shared ones. Set only when pipelineOverReleasingClaims is on.
@@ -125,11 +127,10 @@ func (drap *draPlugin) OnSessionOpen(ssn *framework.Session) {
 	drap.podsByUID = nil
 	drap.claimUsers = nil
 	if drap.pipelineOverReleasingClaims && drap.manager != nil {
-		drap.podsByUID = map[types.UID]*pod_info.PodInfo{}
+		drap.podsByUID = indexSessionPods(ssn.ClusterInfo.PodGroupInfos, ssn.ClusterInfo.Nodes)
 		drap.claimUsers = map[string]int{}
 		for _, podGroup := range ssn.ClusterInfo.PodGroupInfos {
 			for _, pod := range podGroup.GetAllPodsMap() {
-				drap.podsByUID[pod.Pod.UID] = pod
 				for _, podClaim := range pod.Pod.Spec.ResourceClaims {
 					if claimName, err := resources.GetResourceClaimName(pod.Pod, &podClaim); err == nil {
 						drap.claimUsers[pod.Namespace+"/"+claimName]++
@@ -482,13 +483,40 @@ func (drap *draPlugin) withoutReleasingDevices(state *structured.AllocatedState)
 	return &out, nil
 }
 
+// indexSessionPods maps the pods of all PodGroups and all pods on nodes, including pods
+// without a PodGroup, by UID.
+func indexSessionPods(
+	podGroups map[common_info.PodGroupID]*podgroup_info.PodGroupInfo, nodes map[string]*node_info.NodeInfo,
+) map[types.UID]*pod_info.PodInfo {
+	pods := map[types.UID]*pod_info.PodInfo{}
+	for _, node := range nodes {
+		for _, pod := range node.PodInfos {
+			pods[pod.Pod.UID] = pod
+		}
+	}
+	for _, podGroup := range podGroups {
+		for _, pod := range podGroup.GetAllPodsMap() {
+			pods[pod.Pod.UID] = pod
+		}
+	}
+	return pods
+}
+
+// reservedOnlyForReleasingPods reports whether every consumer of claim is releasing. A
+// consumer that is finished, or no longer known at all (deleted), counts as releasing: the
+// resource-claim controller removes it from ReservedFor only some time later.
 func (drap *draPlugin) reservedOnlyForReleasingPods(claim *resourceapi.ResourceClaim) bool {
 	if len(claim.Status.ReservedFor) == 0 {
 		return false
 	}
 	for _, consumer := range claim.Status.ReservedFor {
 		pod := drap.podsByUID[consumer.UID]
-		if pod == nil || pod.Status != pod_status.Releasing {
+		if pod == nil {
+			continue
+		}
+		switch pod.Status {
+		case pod_status.Releasing, pod_status.Succeeded, pod_status.Failed:
+		default:
 			return false
 		}
 	}
