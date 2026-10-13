@@ -11,6 +11,10 @@ import (
 	"go.uber.org/mock/gomock"
 	v1 "k8s.io/api/core/v1"
 	resourceapi "k8s.io/api/resource/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
+	utilfeature "k8s.io/apiserver/pkg/util/feature"
+	featuregatetesting "k8s.io/component-base/featuregate/testing"
+	k8sfeatures "k8s.io/kubernetes/pkg/features"
 	"k8s.io/utils/ptr"
 
 	"github.com/kai-scheduler/KAI-scheduler/pkg/scheduler/actions/allocate"
@@ -184,4 +188,58 @@ func TestPipelineOverReleasingClaims_ReusedReleasingClaimStaysStrict(t *testing.
 			require.Error(t, err, "the pod still needs holder-channel, so that device cannot satisfy pending-channel")
 		})
 	}
+}
+
+// Partitionable devices on different nodes can draw on one shared counter. Freeing the
+// releasing pod's device frees its counter units for every such device, so a device that
+// consumes counters is not exclusive to its node and stays strict.
+func TestPipelineOverReleasingClaims_SharedCounterDevicesStayStrict(t *testing.T) {
+	test_utils.InitTestingInfrastructure()
+	featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, k8sfeatures.DRAPartitionableDevices, true)
+	gang := pendingChannelJob("gang", 1, 2)
+	topology := channelNodesTopology(t, []string{"node0", "node1"}, gang)
+	topology.Jobs = append(topology.Jobs[:1], topology.Jobs[2:]...)
+	topology.TestDRAObjects.ResourceClaims = append(topology.TestDRAObjects.ResourceClaims[:1], topology.TestDRAObjects.ResourceClaims[2:]...)
+	topology.TestDRAObjects.ResourceClaims[0].ClaimStatus.Allocation.Devices.Results[0].Pool = "cluster"
+	topology.TestDRAObjects.ResourceSlices = []*dra_fake.TestResourceSlice{
+		{Name: "local-node0", NodeName: "node0", PoolName: "cluster", Count: 1},
+		{Name: "local-node1", NodeName: "node1", PoolName: "cluster", Count: 1},
+		{Name: "counters", AllNodes: true, PoolName: "cluster"},
+	}
+	ssn := setupTestSession(t, topology, gomock.NewController(t))
+	edit := func(slice *resourceapi.ResourceSlice) {
+		slice.Spec.AllNodes = nil
+		counter := map[string]resourceapi.Counter{"unit": {Value: resource.MustParse("1")}}
+		if slice.Name == "counters" {
+			slice.Spec.NodeName = nil
+			slice.Spec.AllNodes = ptr.To(true)
+			slice.Spec.SharedCounters = []resourceapi.CounterSet{{Name: "shared", Counters: counter}}
+			return
+		}
+		if slice.Name == "local-node1" {
+			slice.Spec.Devices[0].Name = "1"
+		}
+		slice.Spec.Devices[0].ConsumesCounters = []resourceapi.DeviceCounterConsumption{{CounterSet: "shared", Counters: counter}}
+	}
+	editSlices(t, ssn, edit)
+	for _, node := range ssn.ClusterInfo.Nodes {
+		task := getTaskByStatus(t, ssn, "gang", pod_status.Pending)
+		ready, err := ssn.IsTaskReadyForBinding(task, node)
+		require.NoError(t, err)
+		require.False(t, ready, "the holder consumes the counter on either node")
+	}
+	allocate.New().Execute(ssn)
+	counts := pipelinedOn(ssn, "gang")
+	t.Logf("waiters for one shared counter unit: %v", counts)
+	// Even after the holder disappears, the gang cannot bind both pods.
+	topology.Jobs = topology.Jobs[1:]
+	topology.TestDRAObjects.ResourceClaims = topology.TestDRAObjects.ResourceClaims[1:]
+	freeSession := setupTestSession(t, topology, gomock.NewController(t))
+	editSlices(t, freeSession, edit)
+	allocate.New().Execute(freeSession)
+	for _, task := range freeSession.ClusterInfo.PodGroupInfos[common_info.NewPodGroupID("test", "gang")].GetAllPodsMap() {
+		require.Equal(t, pod_status.Pending, task.Status)
+	}
+	t.Log("after the holder disappears: both gang pods are still Pending")
+	require.LessOrEqual(t, counts["node0"]+counts["node1"], 1, "different DeviceIDs still consume the same exclusive backing capacity")
 }
