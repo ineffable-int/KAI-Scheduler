@@ -136,7 +136,7 @@ func (s *byPodSolver) runSimulation(
 // re-place them. The kept batches are re-simulated as a fresh placement, which can land
 // differently, so the pruned solution is kept only if it is smaller than the original
 // (see prunedIsSmaller); otherwise the original solution is rebuilt. Returns nil when
-// there is nothing to prune.
+// there is nothing to prune, or when the original solution evicts no pod of a dropped batch.
 func (s *byPodSolver) pruneSolution(
 	session *framework.Session, sc *scenario.ByNodeScenario, statement *framework.Statement,
 	allVictims []*pod_info.PodInfo, originalNodes map[common_info.PodID]string,
@@ -178,15 +178,27 @@ func (s *byPodSolver) pruneSolution(
 			keep[rep] = true
 		}
 	}
+	evicted := make(map[common_info.PodID]bool, len(original.victimsTasks))
+	for _, victim := range original.victimsTasks {
+		evicted[victim.UID] = true
+	}
 	var keptBatches [][]*pod_info.PodInfo
 	var keptTasks []*pod_info.PodInfo
+	droppedEvicted := false
 	for _, rep := range batchOrder {
 		if keep[rep] {
 			keptBatches = append(keptBatches, batches[rep].tasks)
 			keptTasks = append(keptTasks, batches[rep].tasks...)
+			continue
+		}
+		for _, task := range batches[rep].tasks {
+			droppedEvicted = droppedEvicted || evicted[task.UID]
 		}
 	}
-	if len(keptTasks) == 0 || len(keptTasks) == len(allVictims) {
+	// The original solution already leaves every dropped batch in place. Pruning exists to
+	// spare evicted pods of dropped batches, so it would cost two simulations for, at best,
+	// a different placement of the kept ones.
+	if len(keptTasks) == 0 || !droppedEvicted {
 		return nil
 	}
 
