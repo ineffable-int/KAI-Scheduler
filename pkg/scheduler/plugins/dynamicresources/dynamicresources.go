@@ -470,7 +470,10 @@ func (drap *draPlugin) withoutReleasingDevices(state *structured.AllocatedState)
 			continue
 		}
 		for _, result := range claim.Status.Allocation.Devices.Results {
-			if result.ShareID != nil {
+			// Shared and admin-access results are not what put the device in AllocatedDevices:
+			// shares are tracked separately, and admin access does not allocate the device, so
+			// another claim may hold it.
+			if result.ShareID != nil || (result.AdminAccess != nil && *result.AdminAccess) {
 				continue
 			}
 			out.AllocatedDevices.Delete(structured.MakeDeviceID(result.Driver, result.Pool, result.Device))

@@ -12,6 +12,7 @@ import (
 	. "go.uber.org/mock/gomock"
 	resourceapi "k8s.io/api/resource/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/utils/ptr"
 
 	"github.com/kai-scheduler/KAI-scheduler/pkg/scheduler/actions/allocate"
 	"github.com/kai-scheduler/KAI-scheduler/pkg/scheduler/api/common_info"
@@ -403,6 +404,43 @@ func TestPipelineOverReleasingClaims_UnsupportedShapesStayStrict(t *testing.T) {
 		ssn := setupTestSession(t, topology, controller)
 		job := ssn.ClusterInfo.PodGroupInfos[common_info.NewPodGroupID("test", "shared")]
 		task := getTaskByStatus(t, ssn, "shared", pod_status.Pending)
+		require.NoError(t, ssn.PrePredicateFn(task, job))
+		assert.Error(t, ssn.PredicateFn(task, job, ssn.ClusterInfo.Nodes["node0"]))
+	})
+
+	// The allocator does not count admin-access results as allocated, so the device of a
+	// releasing admin-access claim may also be allocated to a running claim. The retry must
+	// not free it.
+	t.Run("releasing admin-access claim on a device in use", func(t *testing.T) {
+		topology := releasingClaimTopology(t, pod_status.Releasing, true, 0)
+		holderResult := &topology.TestDRAObjects.ResourceClaims[0].ClaimStatus.Allocation.Devices.Results[0]
+		holderResult.AdminAccess = ptr.To(true)
+		topology.Jobs = append(topology.Jobs, &jobs_fake.TestJobBasic{
+			Name: "user", Namespace: "test", QueueName: "q-1",
+			Tasks: []*tasks_fake.TestTaskBasic{
+				{State: pod_status.Running, NodeName: "node0", ResourceClaimNames: []string{"user-channel"}},
+			},
+		})
+		sameDevice := resourceapi.DeviceRequestAllocationResult{
+			Request: "request", Driver: holderResult.Driver, Pool: holderResult.Pool, Device: holderResult.Device,
+		}
+		topology.TestDRAObjects.ResourceClaims = append(topology.TestDRAObjects.ResourceClaims,
+			&dra_fake.TestResourceClaim{
+				Name: "user-channel", Namespace: "test", DeviceClassName: channelClass, Count: 1,
+				ClaimStatus: &resourceapi.ResourceClaimStatus{
+					Allocation: &resourceapi.AllocationResult{
+						Devices: resourceapi.DeviceAllocationResult{
+							Results: []resourceapi.DeviceRequestAllocationResult{sameDevice},
+						},
+					},
+					ReservedFor: []resourceapi.ResourceClaimConsumerReference{
+						{Resource: "pods", Name: "user-0", UID: "user-0"},
+					},
+				},
+			})
+		ssn := setupTestSession(t, topology, controller)
+		job := ssn.ClusterInfo.PodGroupInfos[common_info.NewPodGroupID("test", "pending")]
+		task := getTaskByStatus(t, ssn, "pending", pod_status.Pending)
 		require.NoError(t, ssn.PrePredicateFn(task, job))
 		assert.Error(t, ssn.PredicateFn(task, job, ssn.ClusterInfo.Nodes["node0"]))
 	})
