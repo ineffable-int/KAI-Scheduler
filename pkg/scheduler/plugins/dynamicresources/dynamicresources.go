@@ -55,6 +55,9 @@ type draPlugin struct {
 	// to find claims whose consumers are all releasing. Set only when
 	// pipelineOverReleasingClaims is on.
 	podsByUID map[types.UID]*pod_info.PodInfo
+	// podPhases is ClusterInfo.PodPhases: the phase of every pod in the cluster, to tell a
+	// deleted consumer from a live pod the session does not track.
+	podPhases map[types.UID]v1.PodPhase
 	// claimUsers counts the session's pods that reference each claim ("namespace/name"), to
 	// tell a pod's own claims from shared ones. Set only when pipelineOverReleasingClaims is on.
 	claimUsers map[string]int
@@ -129,6 +132,7 @@ func (drap *draPlugin) OnSessionOpen(ssn *framework.Session) {
 	drap.claimUsers = nil
 	if drap.pipelineOverReleasingClaims && drap.manager != nil {
 		drap.podsByUID = indexSessionPods(ssn.ClusterInfo.PodGroupInfos, ssn.ClusterInfo.Nodes)
+		drap.podPhases = ssn.ClusterInfo.PodPhases
 		drap.claimUsers = map[string]int{}
 		for _, podGroup := range ssn.ClusterInfo.PodGroupInfos {
 			for _, pod := range podGroup.GetAllPodsMap() {
@@ -508,8 +512,9 @@ func indexSessionPods(
 }
 
 // reservedOnlyForReleasingPods reports whether every consumer of claim is releasing. A
-// consumer that is finished, or no longer known at all (deleted), counts as releasing: the
-// resource-claim controller removes it from ReservedFor only some time later.
+// consumer that is finished, or deleted (not in the cluster's pod list), counts as releasing:
+// the resource-claim controller removes it from ReservedFor only some time later. A consumer
+// that exists but is not a session pod (another scheduler's unbound pod) counts as holding.
 func (drap *draPlugin) reservedOnlyForReleasingPods(claim *resourceapi.ResourceClaim) bool {
 	if len(claim.Status.ReservedFor) == 0 {
 		return false
@@ -517,6 +522,10 @@ func (drap *draPlugin) reservedOnlyForReleasingPods(claim *resourceapi.ResourceC
 	for _, consumer := range claim.Status.ReservedFor {
 		pod := drap.podsByUID[consumer.UID]
 		if pod == nil {
+			phase, exists := drap.podPhases[consumer.UID]
+			if drap.podPhases == nil || (exists && phase != v1.PodSucceeded && phase != v1.PodFailed) {
+				return false
+			}
 			continue
 		}
 		switch pod.Status {

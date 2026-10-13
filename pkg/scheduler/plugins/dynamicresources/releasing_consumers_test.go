@@ -35,7 +35,10 @@ func TestReleasingConsumersSeePodsWithoutPodGroup(t *testing.T) {
 	nodes := map[string]*node_info.NodeInfo{
 		"node0": {Name: "node0", PodInfos: map[common_info.PodID]*pod_info.PodInfo{pod_info.PodKey(pod): running}},
 	}
-	drap := &draPlugin{podsByUID: indexSessionPods(map[common_info.PodGroupID]*podgroup_info.PodGroupInfo{}, nodes)}
+	drap := &draPlugin{
+		podsByUID: indexSessionPods(map[common_info.PodGroupID]*podgroup_info.PodGroupInfo{}, nodes),
+		podPhases: map[types.UID]v1.PodPhase{"other-0": v1.PodRunning},
+	}
 
 	assert.Equal(t, pod_status.Running, running.Status)
 	assert.False(t, drap.reservedOnlyForReleasingPods(claimReservedFor("other-0")), "running pod without a PodGroup")

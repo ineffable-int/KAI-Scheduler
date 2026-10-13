@@ -13,6 +13,7 @@ import (
 
 	. "go.uber.org/mock/gomock"
 	"gopkg.in/yaml.v2"
+	v1 "k8s.io/api/core/v1"
 	resourceapi "k8s.io/api/resource/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -74,6 +75,7 @@ func CreateFakeSession(schedulerConfig *TestSessionConfig,
 			MinNodeGPUMemoryMiB: computeMinNodeGPUMemory(nodesInfoMap),
 			MaxNodeGPUMemoryMiB: computeMaxNodeGPUMemory(nodesInfoMap),
 			ResourceVectorMap:   vectorMap,
+			PodPhases:           podPhases(jobInfoMap),
 		},
 		SchedulerParams: conf.SchedulerParams{
 			QueueLabelKey: constants.DefaultQueueLabel,
@@ -514,4 +516,15 @@ func getDeviceClasses(testMetadata TestTopologyBasic) []*resourceapi.DeviceClass
 		objects = append(objects, &deviceClassObject)
 	}
 	return objects
+}
+
+// podPhases lists the phase of every pod in the test jobs, as the snapshot does for the cluster.
+func podPhases(jobs map[common_info.PodGroupID]*podgroup_info.PodGroupInfo) map[types.UID]v1.PodPhase {
+	phases := map[types.UID]v1.PodPhase{}
+	for _, job := range jobs {
+		for _, task := range job.GetAllPodsMap() {
+			phases[task.Pod.UID] = task.Pod.Status.Phase
+		}
+	}
+	return phases
 }
