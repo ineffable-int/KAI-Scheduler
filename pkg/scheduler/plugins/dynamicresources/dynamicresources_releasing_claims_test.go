@@ -458,3 +458,36 @@ func TestPipelineOverReleasingClaims_UnsupportedShapesStayStrict(t *testing.T) {
 		assert.Error(t, ssn.PredicateFn(task, job, ssn.ClusterInfo.Nodes["node0"]))
 	})
 }
+
+// A claim can still list a consumer that is gone or finished: the resource-claim controller
+// clears ReservedFor some time after the pod is deleted or terminates. Until then the device
+// is as good as released and must not count as held.
+func TestPipelineOverReleasingClaims_GoneOrFinishedConsumers(t *testing.T) {
+	test_utils.InitTestingInfrastructure()
+	controller := NewController(t)
+	defer controller.Finish()
+
+	fits := func(t *testing.T, topology test_utils.TestTopologyBasic) error {
+		ssn := setupTestSession(t, topology, controller)
+		job := ssn.ClusterInfo.PodGroupInfos[common_info.NewPodGroupID("test", "pending")]
+		task := getTaskByStatus(t, ssn, "pending", pod_status.Pending)
+		require.NoError(t, ssn.PrePredicateFn(task, job))
+		return ssn.PredicateFn(task, job, ssn.ClusterInfo.Nodes["node0"])
+	}
+
+	t.Run("consumer deleted", func(t *testing.T) {
+		topology := releasingClaimTopology(t, pod_status.Releasing, true, 0)
+		topology.Jobs = topology.Jobs[1:] // drop the holder pod; its claim still lists it
+		assert.NoError(t, fits(t, topology))
+	})
+	for _, state := range []pod_status.PodStatus{pod_status.Succeeded, pod_status.Failed} {
+		t.Run(fmt.Sprintf("consumer %s", state), func(t *testing.T) {
+			assert.NoError(t, fits(t, releasingClaimTopology(t, state, true, 0)))
+		})
+	}
+	t.Run("consumer deleted, argument off", func(t *testing.T) {
+		topology := releasingClaimTopology(t, pod_status.Releasing, false, 0)
+		topology.Jobs = topology.Jobs[1:]
+		assert.Error(t, fits(t, topology))
+	})
+}
