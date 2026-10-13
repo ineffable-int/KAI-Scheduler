@@ -57,11 +57,23 @@ func (alloc *consolidationAction) Execute(ssn *framework.Session) {
 	log.InfraLogger.V(2).Infof("There are <%d> PodGroupInfos and <%d> Queues in total for scheduling",
 		jobsOrderByQueues.Len(), ssn.CountLeafQueues())
 
-	smallestFailedJobs := common.NewMinimalJobRepresentatives()
+	// Victim filters can compare the preemptor's PodGroup priority, which the scheduling
+	// signature does not cover, so failures are only comparable at equal priority.
+	keyFailuresByPriority := len(ssn.ConsolidationVictimFilterFns) > 0
+	smallestFailedJobsByPriority := map[int32]*common.MinimalJobRepresentatives{}
 
 	for !jobsOrderByQueues.IsEmpty() {
 		job := jobsOrderByQueues.PopNextJob()
 
+		failureKey := int32(0)
+		if keyFailuresByPriority {
+			failureKey = job.Priority
+		}
+		smallestFailedJobs, found := smallestFailedJobsByPriority[failureKey]
+		if !found {
+			smallestFailedJobs = common.NewMinimalJobRepresentatives()
+			smallestFailedJobsByPriority[failureKey] = smallestFailedJobs
+		}
 		if ssn.UseSchedulingSignatures() {
 			easier, otherJob := smallestFailedJobs.IsEasierToSchedule(job)
 			if !easier {
