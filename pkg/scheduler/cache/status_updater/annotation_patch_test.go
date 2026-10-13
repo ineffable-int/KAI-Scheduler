@@ -135,45 +135,116 @@ func TestRemovalOfUnsentAnnotationApplies(t *testing.T) {
 	}
 }
 
-func runFailingPatch(t *testing.T, patchErr error, wait time.Duration) (int32, bool) {
+type scheduledRetry struct {
+	delay time.Duration
+	fire  func()
+}
+
+type failingPatchRun struct {
+	su      *defaultStatusUpdater
+	key     updatePayloadKey
+	calls   atomic.Int32
+	retries chan scheduledRetry
+	stopCh  chan struct{}
+}
+
+// startFailingPatch runs an updater whose pod group patches fail with patchErr. Its retry
+// timers are handed to the test instead of firing on their own.
+func startFailingPatch(patchErr error) *failingPatchRun {
+	r := &failingPatchRun{retries: make(chan scheduledRetry, 1), stopCh: make(chan struct{})}
 	kaiClient := kubeaischedfake.NewSimpleClientset()
-	su := New(nil, kaiClient, nil, 1, false, "")
-	key := su.keyForPodGroupPayload("pg", "ns", "uid")
-	var patchCalls atomic.Int32
+	r.su = New(nil, kaiClient, nil, 1, false, "")
+	r.su.afterFunc = func(delay time.Duration, fire func()) { r.retries <- scheduledRetry{delay, fire} }
+	r.key = r.su.keyForPodGroupPayload("pg", "ns", "uid")
 	kaiClient.SchedulingV2alpha2().(*fakeschedulingv2alpha2.FakeSchedulingV2alpha2).PrependReactor(
 		"patch", "podgroups", func(faketesting.Action) (bool, runtime.Object, error) {
-			patchCalls.Add(1)
+			r.calls.Add(1)
 			return true, nil, patchErr
 		})
-
-	stopCh := make(chan struct{})
-	defer close(stopCh)
-	su.Run(stopCh)
-	su.pushToUpdateQueue(&updatePayload{key: key, objectType: podGroupType},
+	r.su.Run(r.stopCh)
+	r.su.pushToUpdateQueue(&updatePayload{key: r.key, objectType: podGroupType},
 		&inflightUpdate{object: testPodGroup(nil), patchData: []byte(`{}`)})
-	time.Sleep(wait)
-	_, inFlight := su.inFlightPodGroups.Load(key)
-	return patchCalls.Load(), inFlight
+	return r
+}
+
+func (r *failingPatchRun) nextRetry(t *testing.T) scheduledRetry {
+	t.Helper()
+	select {
+	case retry := <-r.retries:
+		return retry
+	case <-time.After(5 * time.Second):
+		t.Fatalf("no retry scheduled after %d patch calls", r.calls.Load())
+		return scheduledRetry{}
+	}
+}
+
+func (r *failingPatchRun) inFlight() bool {
+	_, found := r.su.inFlightPodGroups.Load(r.key)
+	return found
 }
 
 func TestInvalidPatchIsNotRetried(t *testing.T) {
 	invalid := apierrors.NewInvalid(schema.GroupKind{Group: "scheduling.run.ai", Kind: "PodGroup"}, "pg",
 		field.ErrorList{field.Invalid(field.NewPath("metadata"), "", "test")})
-	calls, inFlight := runFailingPatch(t, invalid, 300*time.Millisecond)
-	if calls != 1 {
-		t.Errorf("expected 1 patch call, got %d", calls)
+	r := startFailingPatch(invalid)
+	defer close(r.stopCh)
+
+	if !waitUntil(2*time.Second, func() bool { return !r.inFlight() }) {
+		t.Fatal("update still in flight after an invalid patch")
 	}
-	if inFlight {
-		t.Errorf("update still in flight after an invalid patch")
+	select {
+	case <-r.retries:
+		t.Error("invalid patch scheduled a retry")
+	default:
+	}
+	if calls := r.calls.Load(); calls != 1 {
+		t.Errorf("expected 1 patch call, got %d", calls)
 	}
 }
 
 func TestFailedPatchIsRetriedWithBackoff(t *testing.T) {
-	calls, inFlight := runFailingPatch(t, errors.New("test"), 300*time.Millisecond)
-	if calls < 2 || calls > 4 {
-		t.Errorf("expected 2-4 patch calls with backoff, got %d", calls)
+	r := startFailingPatch(errors.New("test"))
+	defer close(r.stopCh)
+
+	for i, want := range []time.Duration{50 * time.Millisecond, 100 * time.Millisecond, 200 * time.Millisecond} {
+		retry := r.nextRetry(t)
+		if retry.delay != want {
+			t.Errorf("retry %d: delay %v, want %v", i, retry.delay, want)
+		}
+		if calls := r.calls.Load(); calls != int32(i+1) {
+			t.Errorf("retry %d: %d patch calls, want %d", i, calls, i+1)
+		}
+		retry.fire()
 	}
-	if !inFlight {
+	r.nextRetry(t)
+	if !r.inFlight() {
 		t.Errorf("retried update dropped")
+	}
+}
+
+// A retry timer that fires after shutdown must return instead of blocking on the queue. No
+// queue worker runs, so a send without the stop channel would block forever.
+func TestRetryAfterShutdownDoesNotBlock(t *testing.T) {
+	su := New(nil, kubeaischedfake.NewSimpleClientset(), nil, 1, false, "")
+	retries := make(chan func(), 1)
+	su.afterFunc = func(_ time.Duration, fire func()) { retries <- fire }
+	stopCh := make(chan struct{})
+	su.stopCh = stopCh
+	close(stopCh)
+
+	key := su.keyForPodGroupPayload("pg", "ns", "uid")
+	update := &inflightUpdate{object: testPodGroup(nil), patchData: []byte(`{}`)}
+	su.inFlightPodGroups.Store(key, update)
+	su.retryPodGroupUpdate(key, update)
+
+	done := make(chan struct{})
+	go func() {
+		(<-retries)()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("retry blocked after shutdown")
 	}
 }

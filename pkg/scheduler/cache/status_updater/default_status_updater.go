@@ -77,6 +77,10 @@ type defaultStatusUpdater struct {
 	inFlightPods      sync.Map
 
 	appliedPodGroupUpdates sync.Map
+
+	// afterFunc schedules pod group retries; tests replace it to fire them by hand.
+	afterFunc func(time.Duration, func())
+	stopCh    <-chan struct{}
 }
 
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;update;patch;delete;list;get;watch
@@ -100,6 +104,7 @@ func New(
 		updateQueueIn:     make(chan *updatePayload),
 		updateQueueOut:    make(chan *updatePayload),
 		updateQueueBuffer: make([]*updatePayload, 0, 1024),
+		afterFunc:         func(delay time.Duration, f func()) { time.AfterFunc(delay, f) },
 	}
 }
 

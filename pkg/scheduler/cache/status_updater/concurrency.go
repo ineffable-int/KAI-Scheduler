@@ -23,6 +23,7 @@ const (
 )
 
 func (su *defaultStatusUpdater) Run(stopCh <-chan struct{}) {
+	su.stopCh = stopCh
 	for i := 0; i < su.numberOfWorkers; i++ {
 		go su.updateWorker(stopCh)
 	}
@@ -174,17 +175,20 @@ func isTerminalUpdateError(err error) bool {
 }
 
 // retryPodGroupUpdate requeues a failed update after an exponential backoff, unless a newer
-// update for the same pod group replaced it in the meantime.
+// update for the same pod group replaced it in the meantime or the updater has stopped.
 func (su *defaultStatusUpdater) retryPodGroupUpdate(key updatePayloadKey, updateData *inflightUpdate) {
 	delay := podGroupRetryMaxDelay
 	if retries := updateData.retries.Add(1) - 1; retries < 16 {
 		delay = min(podGroupRetryBaseDelay<<retries, podGroupRetryMaxDelay)
 	}
-	time.AfterFunc(delay, func() {
+	su.afterFunc(delay, func() {
 		if current, found := su.inFlightPodGroups.Load(key); !found || current != updateData {
 			return
 		}
-		su.updateQueueIn <- &updatePayload{key: key, objectType: podGroupType}
+		select {
+		case su.updateQueueIn <- &updatePayload{key: key, objectType: podGroupType}:
+		case <-su.stopCh:
+		}
 	})
 }
 
