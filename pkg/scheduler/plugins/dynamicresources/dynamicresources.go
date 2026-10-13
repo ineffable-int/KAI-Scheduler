@@ -392,7 +392,7 @@ func (drap *draPlugin) ownClaims(claims []*resourceapi.ResourceClaim) bool {
 }
 
 // exclusiveOnNode reports whether every allocated device is exclusive (not shared, no admin
-// access) and published by a ResourceSlice of the node itself.
+// access, no shared counters) and published by a ResourceSlice of the node itself.
 func exclusiveOnNode(results []resourceapi.AllocationResult, slices []*resourceapi.ResourceSlice, nodeName string) bool {
 	local := map[structured.DeviceID]bool{}
 	for _, slice := range slices {
@@ -400,6 +400,10 @@ func exclusiveOnNode(results []resourceapi.AllocationResult, slices []*resourcea
 			continue
 		}
 		for _, device := range slice.Spec.Devices {
+			// A device drawing on shared counters is backed by capacity other devices use too.
+			if len(device.ConsumesCounters) > 0 {
+				continue
+			}
 			local[structured.MakeDeviceID(slice.Spec.Driver, slice.Spec.Pool.Name, device.Name)] = true
 		}
 	}
