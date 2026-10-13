@@ -5,6 +5,7 @@ package dynamicresources
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -329,7 +330,7 @@ func (drap *draPlugin) filter(task *pod_info.PodInfo, _ *podgroup_info.PodGroupI
 	if err != nil && drap.pipelineOverReleasingClaims && !hasSpecialClaim && drap.ownClaims(claimsToAllocate) {
 		// The node fits if the only devices in the way are held by releasing pods. The task
 		// can then be pipelined there, and bindReady holds the bind until they are gone.
-		results, slices, relaxedErr := drap.allocationResults(nodeInfo, claimsToAllocate, true)
+		results, slices, relaxedErr := drap.allocationResults(nodeInfo.Node, claimsToAllocate, true)
 		if relaxedErr == nil && exclusiveOnNode(results, slices, nodeInfo.Name) {
 			log.InfraLogger.V(5).Do(func() {
 				log.InfraLogger.Infof("Task <%s/%s> fits node %s over DRA devices held by releasing pods",
@@ -405,19 +406,23 @@ func exclusiveOnNode(results []resourceapi.AllocationResult, slices []*resourcea
 	return true
 }
 
+// errDevicesUnavailable means the allocator found no devices for the claims; any other
+// error from allocationResults is a failure of the check itself.
+var errDevicesUnavailable = errors.New("no devices available")
+
 // checkAllocatable reports whether claims can be allocated on node. With overReleasing, the
 // devices of claims whose consumers are all releasing pods count as free.
 func (drap *draPlugin) checkAllocatable(
 	nodeInfo *node_info.NodeInfo, claims []*resourceapi.ResourceClaim, overReleasing bool,
 ) error {
-	_, _, err := drap.allocationResults(nodeInfo, claims, overReleasing)
+	_, _, err := drap.allocationResults(nodeInfo.Node, claims, overReleasing)
 	return err
 }
 
 // allocationResults allocates claims on node without recording the result, and returns the
 // results with the slices they were taken from.
 func (drap *draPlugin) allocationResults(
-	nodeInfo *node_info.NodeInfo, claims []*resourceapi.ResourceClaim, overReleasing bool,
+	node *v1.Node, claims []*resourceapi.ResourceClaim, overReleasing bool,
 ) ([]resourceapi.AllocationResult, []*resourceapi.ResourceSlice, error) {
 	allocatedState, err := drap.manager.ResourceClaims().GatherAllocatedState()
 	if err != nil {
@@ -445,12 +450,12 @@ func (drap *draPlugin) allocationResults(
 		return nil, nil, fmt.Errorf("failed to create allocator: %v", err)
 	}
 
-	results, err := allocator.Allocate(context.Background(), nodeInfo.Node, claims)
+	results, err := allocator.Allocate(context.Background(), node, claims)
 	if err != nil {
-		return nil, nil, fmt.Errorf("cannot allocate DRA claims on node %s: %v", nodeInfo.Name, err)
+		return nil, nil, fmt.Errorf("cannot allocate DRA claims on node %s: %v", node.Name, err)
 	}
 	if len(results) != len(claims) {
-		return nil, nil, fmt.Errorf("cannot allocate all DRA claims on node %s", nodeInfo.Name)
+		return nil, nil, fmt.Errorf("cannot allocate all DRA claims on node %s: %w", node.Name, errDevicesUnavailable)
 	}
 
 	return results, slices, nil
@@ -544,7 +549,11 @@ func (drap *draPlugin) bindReady(task *pod_info.PodInfo, nodeInfo *node_info.Nod
 	if len(claims) == 0 {
 		return true, nil
 	}
-	return drap.checkAllocatable(nodeInfo, claims, false) == nil, nil
+	err := drap.checkAllocatable(nodeInfo, claims, false)
+	if errors.Is(err, errDevicesUnavailable) {
+		return false, nil
+	}
+	return err == nil, err
 }
 
 // validateSharedGpuClaimQueueLabel validates that shared GPU DRA claims (non-template claims) have the correct queue label.
@@ -707,14 +716,14 @@ func (drap *draPlugin) allocateResourceClaim(task *pod_info.PodInfo, podClaim *v
 
 	if claim.Status.Allocation == nil {
 		result, err := drap.allocate(node, []*resourceapi.ResourceClaim{claim})
-		if (err != nil || result == nil) && drap.pipelineOverReleasingClaims && task.Status == pod_status.Pipelined {
+		if err == nil && result == nil && drap.pipelineOverReleasingClaims && task.Status == pod_status.Pipelined {
 			// Pipelined over devices still held by releasing pods: nothing to allocate in this
-			// session. The claim is allocated when the task is bound in a later cycle.
-			log.InfraLogger.V(5).Do(func() {
-				log.InfraLogger.Infof("Claim <%s/%s> of pipelined pod not allocated yet: %v",
-					task.Namespace, claimName, err)
-			})
-			return nil
+			// session. The claim is allocated when the task is bound in a later cycle. Any other
+			// failure is reported below.
+			if _, _, relaxedErr := drap.allocationResults(node, []*resourceapi.ResourceClaim{claim}, true); relaxedErr == nil {
+				log.InfraLogger.V(5).Infof("Claim <%s/%s> of pipelined pod not allocated yet", task.Namespace, claimName)
+				return nil
+			}
 		}
 		if err != nil {
 			return fmt.Errorf("failed to allocate resources: %v", err)

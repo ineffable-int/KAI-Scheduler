@@ -491,3 +491,28 @@ func TestPipelineOverReleasingClaims_GoneOrFinishedConsumers(t *testing.T) {
 		assert.Error(t, fits(t, topology))
 	})
 }
+
+// Bind readiness separates "the devices are not free yet" from an allocator error. Only the
+// first means the task should wait; an error must surface instead of pipelining the task
+// every cycle.
+func TestPipelineOverReleasingClaims_BindReadinessReportsAllocatorErrors(t *testing.T) {
+	test_utils.InitTestingInfrastructure()
+	controller := NewController(t)
+	defer controller.Finish()
+
+	topology := releasingClaimTopology(t, pod_status.Releasing, true, 0)
+	ssn := setupTestSession(t, topology, controller)
+	task := getTaskByStatus(t, ssn, "pending", pod_status.Pending)
+	node := ssn.ClusterInfo.Nodes["node0"]
+
+	ready, err := ssn.IsTaskReadyForBinding(task, node)
+	require.NoError(t, err, "devices held by a releasing pod")
+	require.False(t, ready)
+
+	topology = releasingClaimTopology(t, pod_status.Releasing, true, 0)
+	topology.TestDRAObjects.ResourceClaims[1].DeviceClassName = "missing.example.com"
+	ssn = setupTestSession(t, topology, controller)
+	task = getTaskByStatus(t, ssn, "pending", pod_status.Pending)
+	_, err = ssn.IsTaskReadyForBinding(task, ssn.ClusterInfo.Nodes["node0"])
+	require.Error(t, err, "claim of a device class that does not exist")
+}
