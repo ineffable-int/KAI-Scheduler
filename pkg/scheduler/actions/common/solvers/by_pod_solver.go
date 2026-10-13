@@ -14,6 +14,7 @@ import (
 	"github.com/kai-scheduler/KAI-scheduler/pkg/scheduler/api/pod_info"
 	"github.com/kai-scheduler/KAI-scheduler/pkg/scheduler/api/pod_status"
 	"github.com/kai-scheduler/KAI-scheduler/pkg/scheduler/api/podgroup_info"
+	"github.com/kai-scheduler/KAI-scheduler/pkg/scheduler/api/resource_info"
 	"github.com/kai-scheduler/KAI-scheduler/pkg/scheduler/framework"
 	"github.com/kai-scheduler/KAI-scheduler/pkg/scheduler/log"
 )
@@ -81,8 +82,10 @@ func (s *byPodSolver) solve(session *framework.Session, scenario *scenario.ByNod
 	}
 
 	originalNodes := make(map[common_info.PodID]string, len(allVictims))
+	originalGPUs := make(map[common_info.PodID]float64, len(allVictims))
 	for _, victim := range allVictims {
 		originalNodes[victim.UID] = victim.NodeName
+		originalGPUs[victim.UID] = victim.AcceptedGpuRequirement.GetGpusQuota()
 	}
 
 	checkpoint := statement.Checkpoint()
@@ -94,7 +97,7 @@ func (s *byPodSolver) solve(session *framework.Session, scenario *scenario.ByNod
 	result := s.runSimulation(session, scenario, statement, allVictims, maps.Values(s.feasibleNodes))
 	if result != nil {
 		if result.solved && s.pruneVictims {
-			if pruned := s.pruneSolution(session, scenario, statement, allVictims, originalNodes, result); pruned != nil {
+			if pruned := s.pruneSolution(session, scenario, statement, allVictims, originalNodes, originalGPUs, result); pruned != nil {
 				result = pruned
 			}
 		}
@@ -136,7 +139,8 @@ func (s *byPodSolver) runSimulation(
 // there is nothing to prune.
 func (s *byPodSolver) pruneSolution(
 	session *framework.Session, sc *scenario.ByNodeScenario, statement *framework.Statement,
-	allVictims []*pod_info.PodInfo, originalNodes map[common_info.PodID]string, original *solutionResult,
+	allVictims []*pod_info.PodInfo, originalNodes map[common_info.PodID]string,
+	originalGPUs map[common_info.PodID]float64, original *solutionResult,
 ) *solutionResult {
 	preemptorNodes := map[string]bool{}
 	preemptorUID := sc.GetPreemptor().UID
@@ -199,7 +203,7 @@ func (s *byPodSolver) pruneSolution(
 	}
 	if err := common.EvictAllPreemptees(session, keptTasks, pendingJob, statement, s.actionType); err == nil {
 		if result := s.runSimulation(session, pruned, statement, keptTasks, nodes); result != nil && result.solved {
-			if prunedIsSmaller(result, original) {
+			if prunedIsSmaller(result, original, originalGPUs) {
 				log.InfraLogger.V(4).Infof("Pruned victims for <%s/%s>: %d -> %d",
 					pendingJob.Namespace, pendingJob.Name, len(original.victimsTasks), len(result.victimsTasks))
 				return result
@@ -221,16 +225,18 @@ func (s *byPodSolver) pruneSolution(
 }
 
 // prunedIsSmaller accepts a pruned solution only if it evicts fewer pods and no more GPUs
-// than the original, so pruning never widens an eviction.
-func prunedIsSmaller(pruned, original *solutionResult) bool {
+// than the original. GPU totals use the quotas from before the simulations (originalGPUs),
+// because a simulation rewrites a re-placed victim's AcceptedGpuRequirement.
+func prunedIsSmaller(pruned, original *solutionResult, originalGPUs map[common_info.PodID]float64) bool {
 	return len(pruned.victimsTasks) < len(original.victimsTasks) &&
-		victimGPUs(pruned.victimsTasks) <= victimGPUs(original.victimsTasks)
+		resource_info.LessOrEqualWithTolerance(
+			victimGPUs(pruned.victimsTasks, originalGPUs), victimGPUs(original.victimsTasks, originalGPUs))
 }
 
-func victimGPUs(victims []*pod_info.PodInfo) float64 {
+func victimGPUs(victims []*pod_info.PodInfo, originalGPUs map[common_info.PodID]float64) float64 {
 	total := 0.0
 	for _, victim := range victims {
-		total += victim.AcceptedGpuRequirement.GetGpusQuota()
+		total += originalGPUs[victim.UID]
 	}
 	return total
 }
