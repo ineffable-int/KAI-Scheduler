@@ -98,3 +98,61 @@ func TestConsolidationRespectPriority(t *testing.T) {
 		}
 	}
 }
+
+// Two identical 4-GPU pending jobs, of priority 10 and 50, in different queues; the running
+// 2-GPU jobs have priority 25. With consolidationRespectPriority the priority-10 job finds no
+// victims. That failure must not make consolidation skip the priority-50 job, which can move
+// one of them.
+func TestConsolidationRespectPriorityFailureDoesNotSkipHigherPriority(t *testing.T) {
+	test_utils.InitTestingInfrastructure()
+	running := func(name, node string) *jobs_fake.TestJobBasic {
+		return &jobs_fake.TestJobBasic{
+			Name: name, RequiredGPUsPerTask: 2, Priority: 25, QueueName: "queue-running",
+			Tasks: []*tasks_fake.TestTaskBasic{{NodeName: node, State: pod_status.Running}},
+		}
+	}
+	pending := func(name, queue string, priority int32) *jobs_fake.TestJobBasic {
+		return &jobs_fake.TestJobBasic{
+			Name: name, RequiredGPUsPerTask: 4, Priority: priority, QueueName: queue,
+			Tasks: []*tasks_fake.TestTaskBasic{{State: pod_status.Pending}},
+		}
+	}
+	queuePriority := func(p int) *int { return &p }
+	topology := test_utils.TestTopologyBasic{
+		Name: "failed lower-priority job",
+		Jobs: []*jobs_fake.TestJobBasic{
+			running("running-job-0", "node0"),
+			running("running-job-1", "node1"),
+			pending("pending-low", "queue-low", 10),
+			pending("pending-high", "queue-high", 50),
+		},
+		Nodes: map[string]nodes_fake.TestNodeBasic{"node0": {GPUs: 4}, "node1": {GPUs: 4}},
+		Queues: []test_utils.TestQueueBasic{
+			{Name: "queue-running", DeservedGPUs: 4},
+			// queue-low is visited first.
+			{Name: "queue-low", DeservedGPUs: 4, Priority: queuePriority(200)},
+			{Name: "queue-high", DeservedGPUs: 4, Priority: queuePriority(100)},
+		},
+		Mocks: &test_utils.TestMock{
+			SchedulerConf: schedulerConfWithPriorityArgs(t, map[string]string{
+				priority.ConsolidationRespectPriorityKey: "true",
+			}),
+			CacheRequirements: &test_utils.CacheMocking{NumberOfCacheEvictions: 1, NumberOfPipelineActions: 2},
+		},
+	}
+	controller := NewController(t)
+	defer controller.Finish()
+	ssn := test_utils.BuildSession(topology, controller)
+	ssn.SchedulerParams.UseSchedulingSignatures = true // the binary default; the skip happens only with it
+
+	consolidation.New().Execute(ssn)
+
+	for name, want := range map[string]pod_status.PodStatus{
+		"pending-low": pod_status.Pending, "pending-high": pod_status.Pipelined,
+	} {
+		job := ssn.ClusterInfo.PodGroupInfos[common_info.PodGroupID(name)]
+		for _, task := range job.GetAllPodsMap() {
+			require.Equal(t, want, task.Status, task.Name)
+		}
+	}
+}
