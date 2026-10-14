@@ -28,6 +28,7 @@ import (
 	v1 "k8s.io/api/core/v1"
 	resourceapi "k8s.io/api/resource/v1"
 	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/tools/cache"
 
@@ -135,6 +136,10 @@ func (c *ClusterInfo) Snapshot() (*api.ClusterInfo, error) {
 	allPods, err := c.dataLister.ListPods()
 	if err != nil {
 		return nil, fmt.Errorf("error snapshotting pods: %w", err)
+	}
+	snapshot.PodPhases = make(map[types.UID]v1.PodPhase, len(allPods))
+	for _, pod := range allPods {
+		snapshot.PodPhases[pod.UID] = pod.Status.Phase
 	}
 
 	snapshot.ResourceVectorMap = resource_info.NewResourceVectorMap()

@@ -13,6 +13,7 @@ import (
 
 	. "go.uber.org/mock/gomock"
 	"gopkg.in/yaml.v2"
+	v1 "k8s.io/api/core/v1"
 	resourceapi "k8s.io/api/resource/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -36,6 +37,7 @@ import (
 	"github.com/kai-scheduler/KAI-scheduler/pkg/scheduler/log"
 	"github.com/kai-scheduler/KAI-scheduler/pkg/scheduler/plugins"
 	"github.com/kai-scheduler/KAI-scheduler/pkg/scheduler/plugins/numa"
+	"github.com/kai-scheduler/KAI-scheduler/pkg/scheduler/test_utils/dra_fake"
 	"github.com/kai-scheduler/KAI-scheduler/pkg/scheduler/test_utils/jobs_fake"
 	"github.com/kai-scheduler/KAI-scheduler/pkg/scheduler/test_utils/nodes_fake"
 )
@@ -73,6 +75,7 @@ func CreateFakeSession(schedulerConfig *TestSessionConfig,
 			MinNodeGPUMemoryMiB: computeMinNodeGPUMemory(nodesInfoMap),
 			MaxNodeGPUMemoryMiB: computeMaxNodeGPUMemory(nodesInfoMap),
 			ResourceVectorMap:   vectorMap,
+			PodPhases:           podPhases(jobInfoMap),
 		},
 		SchedulerParams: conf.SchedulerParams{
 			QueueLabelKey: constants.DefaultQueueLabel,
@@ -446,9 +449,15 @@ func getResourceClaims(testMetadata TestTopologyBasic) []*resourceapi.ResourceCl
 }
 
 func getResourceSlices(testMetadata TestTopologyBasic) []*resourceapi.ResourceSlice {
+	poolName := func(slice *dra_fake.TestResourceSlice) string {
+		if slice.PoolName != "" {
+			return slice.PoolName
+		}
+		return slice.NodeName
+	}
 	poolSliceCounts := map[string]int64{}
 	for _, resourceSlice := range testMetadata.ResourceSlices {
-		poolSliceCounts[resourceSlice.NodeName]++
+		poolSliceCounts[poolName(resourceSlice)]++
 	}
 
 	var objects []*resourceapi.ResourceSlice
@@ -465,8 +474,8 @@ func getResourceSlices(testMetadata TestTopologyBasic) []*resourceapi.ResourceSl
 			Spec: resourceapi.ResourceSliceSpec{
 				Driver: "nvidia.com/gpu",
 				Pool: resourceapi.ResourcePool{
-					Name:               resourceSlice.NodeName,
-					ResourceSliceCount: poolSliceCounts[resourceSlice.NodeName],
+					Name:               poolName(resourceSlice),
+					ResourceSliceCount: poolSliceCounts[poolName(resourceSlice)],
 				},
 				NodeSelector: resourceSlice.NodeSelector,
 				NodeName:     ptr.To(resourceSlice.NodeName),
@@ -507,4 +516,15 @@ func getDeviceClasses(testMetadata TestTopologyBasic) []*resourceapi.DeviceClass
 		objects = append(objects, &deviceClassObject)
 	}
 	return objects
+}
+
+// podPhases lists the phase of every pod in the test jobs, as the snapshot does for the cluster.
+func podPhases(jobs map[common_info.PodGroupID]*podgroup_info.PodGroupInfo) map[types.UID]v1.PodPhase {
+	phases := map[types.UID]v1.PodPhase{}
+	for _, job := range jobs {
+		for _, task := range job.GetAllPodsMap() {
+			phases[task.Pod.UID] = task.Pod.Status.Phase
+		}
+	}
+	return phases
 }

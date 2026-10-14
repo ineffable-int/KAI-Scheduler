@@ -57,6 +57,9 @@ type TestResourceSlice struct {
 	// +oneOf=NodeSelection
 	AllNodes bool `json:"allNodes,omitempty" protobuf:"bytes,5,opt,name=allNodes"`
 
+	// PoolName names the slice's pool. Defaults to NodeName.
+	PoolName string
+
 	Count int
 }
 
