@@ -22,12 +22,27 @@ package priority
 import (
 	"github.com/kai-scheduler/KAI-scheduler/pkg/scheduler/api/podgroup_info"
 	"github.com/kai-scheduler/KAI-scheduler/pkg/scheduler/framework"
+	"github.com/kai-scheduler/KAI-scheduler/pkg/scheduler/log"
 )
 
-type priorityPlugin struct{}
+const (
+	// ConsolidationRespectPriorityKey makes consolidation evict only jobs of strictly lower
+	// priority than the job it makes room for, as preempt does.
+	ConsolidationRespectPriorityKey     = "consolidationRespectPriority"
+	defaultConsolidationRespectPriority = false
+)
 
-func New(_ framework.PluginArguments) framework.Plugin {
-	return &priorityPlugin{}
+type priorityPlugin struct {
+	consolidationRespectPriority bool
+}
+
+func New(pluginArgs framework.PluginArguments) framework.Plugin {
+	respectPriority, err := pluginArgs.GetBool(ConsolidationRespectPriorityKey, defaultConsolidationRespectPriority)
+	if err != nil {
+		log.InfraLogger.Warningf("Failed to parse %s as bool: %v. Using default value of: %t",
+			ConsolidationRespectPriorityKey, err, defaultConsolidationRespectPriority)
+	}
+	return &priorityPlugin{consolidationRespectPriority: respectPriority}
 }
 
 func (pp *priorityPlugin) Name() string {
@@ -36,6 +51,15 @@ func (pp *priorityPlugin) Name() string {
 
 func (pp *priorityPlugin) OnSessionOpen(ssn *framework.Session) {
 	ssn.AddJobOrderFn(JobOrderFn)
+	if pp.consolidationRespectPriority {
+		ssn.AddConsolidationVictimFilterFn(ConsolidationVictimFilterFn)
+	}
+}
+
+// ConsolidationVictimFilterFn keeps only victims of strictly lower priority than the
+// consolidating job.
+func ConsolidationVictimFilterFn(preemptor, victim *podgroup_info.PodGroupInfo) bool {
+	return victim.Priority < preemptor.Priority
 }
 
 func JobOrderFn(l, r interface{}) int {

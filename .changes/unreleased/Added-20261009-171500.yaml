@@ -1,0 +1,3 @@
+kind: Added
+body: 'Optional priority plugin argument `consolidationRespectPriority`: consolidation evicts only jobs of lower priority than the pending job'
+time: 2026-10-09T17:15:00.000000000Z

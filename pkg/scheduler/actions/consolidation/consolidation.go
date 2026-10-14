@@ -57,11 +57,23 @@ func (alloc *consolidationAction) Execute(ssn *framework.Session) {
 	log.InfraLogger.V(2).Infof("There are <%d> PodGroupInfos and <%d> Queues in total for scheduling",
 		jobsOrderByQueues.Len(), ssn.CountLeafQueues())
 
-	smallestFailedJobs := common.NewMinimalJobRepresentatives()
+	// Victim filters can compare the preemptor's PodGroup priority, which the scheduling
+	// signature does not cover, so failures are only comparable at equal priority.
+	keyFailuresByPriority := len(ssn.ConsolidationVictimFilterFns) > 0
+	smallestFailedJobsByPriority := map[int32]*common.MinimalJobRepresentatives{}
 
 	for !jobsOrderByQueues.IsEmpty() {
 		job := jobsOrderByQueues.PopNextJob()
 
+		failureKey := int32(0)
+		if keyFailuresByPriority {
+			failureKey = job.Priority
+		}
+		smallestFailedJobs, found := smallestFailedJobsByPriority[failureKey]
+		if !found {
+			smallestFailedJobs = common.NewMinimalJobRepresentatives()
+			smallestFailedJobsByPriority[failureKey] = smallestFailedJobs
+		}
 		if ssn.UseSchedulingSignatures() {
 			easier, otherJob := smallestFailedJobs.IsEasierToSchedule(job)
 			if !easier {
@@ -160,7 +172,7 @@ func allPodsReallocated(scenario api.ScenarioInfo) bool {
 }
 
 func buildConsolidationVictimsQueue(ssn *framework.Session, preemptor *podgroup_info.PodGroupInfo) *utils.JobsOrderByQueues {
-	filter := buildPreemptibleFilterFunc(preemptor, ssn.GetMaxNumberConsolidationPreemptees())
+	filter := buildPreemptibleFilterFunc(ssn, preemptor, ssn.GetMaxNumberConsolidationPreemptees())
 	return utils.GetVictimsQueue(ssn, filter)
 }
 
@@ -175,7 +187,7 @@ func getOrderedVictimsQueue(ssn *framework.Session, preemptor *podgroup_info.Pod
 	return utils.NewCachedVictimsQueueGenerator(
 		ssn,
 		func() map[common_info.PodGroupID]*podgroup_info.PodGroupInfo {
-			filter := buildPreemptibleFilterFunc(preemptor, maxPreempteesToTest)
+			filter := buildPreemptibleFilterFunc(ssn, preemptor, maxPreempteesToTest)
 			return utils.GetVictimCandidates(ssn, filter)
 		},
 		utils.JobsOrderInitOptions{
@@ -185,7 +197,7 @@ func getOrderedVictimsQueue(ssn *framework.Session, preemptor *podgroup_info.Pod
 	)
 }
 
-func buildPreemptibleFilterFunc(preemptor *podgroup_info.PodGroupInfo, maxPreempteesToTest int) func(*podgroup_info.PodGroupInfo) bool {
+func buildPreemptibleFilterFunc(ssn *framework.Session, preemptor *podgroup_info.PodGroupInfo, maxPreempteesToTest int) func(*podgroup_info.PodGroupInfo) bool {
 	preempteeJobsCounter := 0
 
 	return func(job *podgroup_info.PodGroupInfo) bool {
@@ -202,6 +214,11 @@ func buildPreemptibleFilterFunc(preemptor *podgroup_info.PodGroupInfo, maxPreemp
 		}
 
 		if job.GetActiveAllocatedTasksCount() == 0 {
+			return false
+		}
+
+		// From open upstream PR kai-scheduler/KAI-Scheduler#2284; keep in sync until it merges.
+		if !ssn.ConsolidationVictimFilter(preemptor, job) {
 			return false
 		}
 
