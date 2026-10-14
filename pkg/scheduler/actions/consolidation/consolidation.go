@@ -217,6 +217,7 @@ func buildPreemptibleFilterFunc(ssn *framework.Session, preemptor *podgroup_info
 			return false
 		}
 
+		// From open upstream PR kai-scheduler/KAI-Scheduler#2284; keep in sync until it merges.
 		if !ssn.ConsolidationVictimFilter(preemptor, job) {
 			return false
 		}

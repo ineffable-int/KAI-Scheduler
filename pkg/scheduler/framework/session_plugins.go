@@ -128,6 +128,7 @@ func (ssn *Session) AddPreemptVictimFilterFn(pf api.VictimFilterFn) {
 	ssn.PreemptVictimFilterFns = append(ssn.PreemptVictimFilterFns, pf)
 }
 
+// From open upstream PR kai-scheduler/KAI-Scheduler#2284; keep in sync until it merges.
 func (ssn *Session) AddConsolidationVictimFilterFn(cf api.VictimFilterFn) {
 	ssn.ConsolidationVictimFilterFns = append(ssn.ConsolidationVictimFilterFns, cf)
 }
@@ -236,6 +237,7 @@ func (ssn *Session) PreemptVictimFilter(preemptor *podgroup_info.PodGroupInfo, v
 	return true
 }
 
+// From open upstream PR kai-scheduler/KAI-Scheduler#2284; keep in sync until it merges.
 func (ssn *Session) ConsolidationVictimFilter(preemptor *podgroup_info.PodGroupInfo, victim *podgroup_info.PodGroupInfo) bool {
 	for _, cf := range ssn.ConsolidationVictimFilterFns {
 		if !cf(preemptor, victim) {
