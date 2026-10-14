@@ -210,6 +210,7 @@ func allocateTaskToNode(ssn *framework.Session, stmt *framework.Statement, task 
 	}
 
 	if taskAllocatable := node.IsTaskAllocatable(task); !isPipelineOnly && taskAllocatable {
+		// From open upstream PR kai-scheduler/KAI-Scheduler#2312; keep in sync until it merges.
 		ready, err := ssn.IsTaskReadyForBinding(task, node)
 		if err != nil {
 			log.InfraLogger.Errorf("Failed to evaluate binding readiness for task %v on %v: %v", task.UID, node.Name, err)

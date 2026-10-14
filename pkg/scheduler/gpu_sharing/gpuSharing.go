@@ -106,6 +106,7 @@ func findGpuForSharingOnNode(task *pod_info.PodInfo, node *node_info.NodeInfo, i
 
 func allocateSharedGPUTask(ssn *framework.Session, stmt *framework.Statement, node *node_info.NodeInfo,
 	task *pod_info.PodInfo, isPipelineOnly bool) bool {
+	// From open upstream PR kai-scheduler/KAI-Scheduler#2312; keep in sync until it merges.
 	updateTasksIfExistsOnNode := !isPipelineOnly
 	if !isPipelineOnly {
 		ready, err := ssn.IsTaskReadyForBinding(task, node)

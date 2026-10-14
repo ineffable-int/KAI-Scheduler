@@ -33,6 +33,7 @@ func (pp *nodeAvailabilityPlugin) OnSessionOpen(ssn *framework.Session) {
 func (pp *nodeAvailabilityPlugin) nodeOrderFn(task *pod_info.PodInfo, node *node_info.NodeInfo) (float64, error) {
 	score := 0.0
 	if taskAllocatable := node.IsTaskAllocatable(task); taskAllocatable {
+		// From open upstream PR kai-scheduler/KAI-Scheduler#2312; keep in sync until it merges.
 		ready, err := pp.session.IsTaskReadyForBinding(task, node)
 		if err != nil {
 			return 0, err

@@ -64,11 +64,13 @@ func (ssn *Session) AddPredicateFn(pf api.PredicateFn) {
 	ssn.PredicateFns = append(ssn.PredicateFns, pf)
 }
 
+// From open upstream PR kai-scheduler/KAI-Scheduler#2312; keep in sync until it merges.
 // AddBindReadyFn registers a check for immediate allocation readiness.
 func (ssn *Session) AddBindReadyFn(fn api.BindReadyFn) {
 	ssn.BindReadyFns = append(ssn.BindReadyFns, fn)
 }
 
+// From open upstream PR kai-scheduler/KAI-Scheduler#2312; keep in sync until it merges.
 // IsTaskReadyForBinding returns false for placements that must remain pipelined.
 func (ssn *Session) IsTaskReadyForBinding(task *pod_info.PodInfo, node *node_info.NodeInfo) (bool, error) {
 	ready := true
