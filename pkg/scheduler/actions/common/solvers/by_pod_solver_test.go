@@ -52,3 +52,32 @@ func newByPodSolverRollbackTestScenario(t *testing.T) (*framework.Session, *scen
 		podgroup_info.SimulatedTaskAllocation)
 	return ssn, scenario.NewByNodeScenario(ssn, pendingJob, pendingTasks, victimTasks, nil)
 }
+
+// When no victim the solution evicts is in a batch pruning would drop, pruning cannot make
+// the solution smaller, so solve must not run the pruned and rebuilt simulations. Each
+// successful simulation calls the validator once.
+func TestSolveSkipsPruningWhenDroppedBatchesAreNotEvicted(t *testing.T) {
+	ssn := newGeneratorTestSession(t, map[string]int{"node-1": 1, "node-2": 2})
+	require.NoError(t, ssn.InitNodeScoringPool())
+	_, onNode1 := addGeneratorTestJob(t, ssn, 1, 20, "team-victim", "node-1")
+	_, onNode2 := addGeneratorTestJob(t, ssn, 1, 21, "team-victim", "node-2")
+	pendingJob := addGeneratorTestPendingJob(t, ssn, 1, 10, "team-pending")
+	pendingTasks := podgroup_info.GetTasksToAllocate(pendingJob, ssn.SubGroupOrderFn, ssn.TaskOrderFn,
+		podgroup_info.SimulatedTaskAllocation)
+	sn := scenario.NewByNodeScenario(ssn, pendingJob, pendingTasks, nil, nil)
+	sn.AddPotentialVictimsTasks(onNode1)
+	sn.AddPotentialVictimsTasks(onNode2)
+
+	simulations := 0
+	countSimulations := func(api.ScenarioInfo) bool { simulations++; return true }
+	solver := newByPodSolver(map[string]*node_info.NodeInfo{}, countSimulations, false, true, framework.Reclaim)
+
+	result := solver.solve(ssn, sn)
+
+	require.True(t, result.solved)
+	for _, victim := range result.victimsTasks {
+		require.NotEqual(t, onNode2[0].UID, victim.UID, "the node-2 pod fits back on its node")
+	}
+	require.Equal(t, 1, simulations)
+	result.statement.Discard()
+}
