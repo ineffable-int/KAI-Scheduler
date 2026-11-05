@@ -369,9 +369,11 @@ type cluster struct {
 	topology test_utils.TestTopologyBasic
 	// terminatingSince: victim job name -> 1-based session in which the victim was evicted.
 	terminatingSince map[string]int
-	// preemptedAt: job name -> 1-based session in which a preemption was committed for the job, i.e. its
-	// LastPreemptionTimestamp annotation (the only state the scheduler keeps between sessions).
+	// preemptedAt: job name -> 1-based session in which a preemption was committed for the job, read back from
+	// cooldowns, the scheduler's in-memory store and the only state it keeps between sessions. The store is
+	// rewritten before each session to the session's simulated clock.
 	preemptedAt map[string]int
+	cooldowns   *conf.PreemptCooldowns
 }
 
 func runSessions(t *testing.T, controller *Controller, s scenario) sessionsResult {
@@ -385,6 +387,7 @@ func runSessions(t *testing.T, controller *Controller, s scenario) sessionsResul
 
 		ssn := test_utils.BuildSession(c.topology, controller)
 		ssn.SchedulerParams.PreemptCooldown = constants.DefaultPreemptCooldown
+		ssn.SchedulerParams.PreemptCooldowns = c.cooldowns
 		if s.preemptCooldown != nil {
 			ssn.SchedulerParams.PreemptCooldown = *s.preemptCooldown
 		}
@@ -487,7 +490,8 @@ func buildCluster(s scenario) *cluster {
 		})
 	}
 
-	c := &cluster{topology: topology, terminatingSince: map[string]int{}, preemptedAt: map[string]int{}}
+	c := &cluster{topology: topology, terminatingSince: map[string]int{}, preemptedAt: map[string]int{},
+		cooldowns: conf.NewPreemptCooldowns()}
 	c.addGang(s, gangName)
 	return c
 }
@@ -578,12 +582,13 @@ func (c *cluster) applyJobOverrides(ssn *framework.Session, s scenario, cycle in
 			job.CreationTimestamp = metav1.NewTime(atSession(createdIn).Add(-preemptorAge))
 		}
 	}
+	c.cooldowns.Open(sessionStart, 0, nil) // empty the store, then refill it on this session's clock
 	for name, session := range c.preemptedAt {
 		if job := ssn.ClusterInfo.PodGroupInfos[jobID(name)]; job != nil {
-			preempted := atSession(session)
-			job.LastPreemptionTimestamp = &preempted
+			c.cooldowns.Record(job.PreemptCooldownKey(), atSession(session))
 		}
 	}
+	ssn.LoadPreemptCooldowns(sessionStart)
 	for name, session := range c.terminatingSince {
 		job := ssn.ClusterInfo.PodGroupInfos[jobID(name)]
 		if job == nil {
@@ -604,9 +609,10 @@ func (c *cluster) applyJobOverrides(ssn *framework.Session, s scenario, cycle in
 // advance records what the finished session did and turns it into the next session's cluster state.
 // It returns the number of pods the session evicted.
 func (c *cluster) advance(ssn *framework.Session, cycle int, sessionStart time.Time) int {
+	open := c.cooldowns.Open(sessionStart, 24*time.Hour, func(string) bool { return true })
 	for _, job := range c.topology.Jobs {
-		preempted := ssn.ClusterInfo.PodGroupInfos[jobID(job.Name)].LastPreemptionTimestamp
-		if preempted == nil {
+		preempted, found := open[ssn.ClusterInfo.PodGroupInfos[jobID(job.Name)].PreemptCooldownKey()]
+		if !found {
 			delete(c.preemptedAt, job.Name)
 		} else if !preempted.Before(sessionStart) {
 			c.preemptedAt[job.Name] = cycle

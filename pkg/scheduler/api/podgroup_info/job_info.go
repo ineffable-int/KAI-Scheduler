@@ -77,7 +77,8 @@ type PodGroupInfo struct {
 	LastStartTimestamp    *time.Time
 	LastEvictionTimestamp *time.Time
 	// LastPreemptionTimestamp is when this job last had a preemption or reclaim committed for it, i.e. when it
-	// last caused other workloads to be evicted. Persisted in the LastPreemptorTimeStamp annotation.
+	// last caused other workloads to be evicted, while its preempt cool-down is open. Sessions get it from the
+	// scheduler's in-memory conf.PreemptCooldowns.
 	LastPreemptionTimestamp *time.Time
 	PodGroup                *enginev2alpha2.PodGroup
 	PodGroupUID             types.UID
@@ -229,6 +230,15 @@ func (pgi *PodGroupInfo) IsWithinPreemptionDelay(now time.Time) bool {
 	return end != nil && now.Before(*end)
 }
 
+// PreemptCooldownKey identifies the job in conf.PreemptCooldowns: its PodGroup's UID, so a PodGroup recreated
+// under the same name starts without a cool-down.
+func (pgi *PodGroupInfo) PreemptCooldownKey() string {
+	if pgi.PodGroup != nil && pgi.PodGroup.UID != "" {
+		return string(pgi.PodGroup.UID)
+	}
+	return pgi.NamespacedName
+}
+
 // PreemptCooldownEnd returns when the cool-down after this job's last committed preemption ends, or nil when
 // the job never preempted or cooldown is not positive.
 func (pgi *PodGroupInfo) PreemptCooldownEnd(cooldown time.Duration) *time.Time {
@@ -299,17 +309,6 @@ func (pgi *PodGroupInfo) SetPodGroup(pg *enginev2alpha2.PodGroup) {
 			})
 		} else {
 			pgi.LastEvictionTimestamp = &evictionTime
-		}
-	}
-
-	if pg.Annotations[commonconstants.LastPreemptorTimeStamp] != "" {
-		preemptionTime, err := time.Parse(time.RFC3339, pg.Annotations[commonconstants.LastPreemptorTimeStamp])
-		if err != nil {
-			// An unparsable timestamp disables the preempt cool-down for the job, so it must not be silent.
-			log.InfraLogger.Warningf("Failed to parse preemption timestamp for podgroup <%s> err: %v",
-				pgi.NamespacedName, err)
-		} else {
-			pgi.LastPreemptionTimestamp = &preemptionTime
 		}
 	}
 
