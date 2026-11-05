@@ -183,7 +183,9 @@ func getOrderedVictimsQueue(ssn *framework.Session, preemptor *podgroup_info.Pod
 	return utils.NewCachedVictimsQueueGenerator(
 		ssn,
 		func() map[common_info.PodGroupID]*podgroup_info.PodGroupInfo {
-			return utils.GetVictimCandidates(ssn, buildFilterFuncForPreempt(ssn, preemptor))
+			candidates := utils.GetVictimCandidates(ssn, buildFilterFuncForPreempt(ssn, preemptor))
+			common.FilterVictimsToUsableNodes(ssn, preemptor, candidates, framework.Preempt)
+			return candidates
 		},
 		utils.JobsOrderInitOptions{
 			FilterNonPreemptible:     true,

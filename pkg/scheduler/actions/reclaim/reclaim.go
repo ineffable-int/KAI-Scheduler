@@ -170,5 +170,6 @@ func getReclaimVictimCandidates(
 		}
 		jobs[job.UID] = job
 	}
+	common.FilterVictimsToUsableNodes(ssn, reclaimer, jobs, framework.Reclaim)
 	return jobs
 }
