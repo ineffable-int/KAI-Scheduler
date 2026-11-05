@@ -211,9 +211,9 @@ func (su *defaultStatusUpdater) RecordJobStatusEvent(
 	var err error
 	var patchData []byte
 	if patchData, err = su.updatePodGroupAnnotations(job); err != nil {
-		log.InfraLogger.V(7).Do(func() {
-			log.InfraLogger.Warningf("Failed to update podgroup annotations, error: %s", err)
-		})
+		// A lost patch can drop the preempt cool-down, so it must not be silent.
+		log.InfraLogger.Errorf("Failed to update podgroup annotations for job <%s>, error: %s",
+			job.NamespacedName, err)
 	}
 	if job.StalenessInfo.Stale {
 		su.recordStaleJobEvent(job)

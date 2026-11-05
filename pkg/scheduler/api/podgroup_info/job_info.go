@@ -317,10 +317,9 @@ func (pgi *PodGroupInfo) SetPodGroup(pg *enginev2alpha2.PodGroup) {
 	if pg.Annotations[commonconstants.LastPreemptorTimeStamp] != "" {
 		preemptionTime, err := time.Parse(time.RFC3339, pg.Annotations[commonconstants.LastPreemptorTimeStamp])
 		if err != nil {
-			log.InfraLogger.V(7).Do(func() {
-				log.InfraLogger.Warningf("Failed to parse preemption timestamp for podgroup <%s> err: %v",
-					pgi.NamespacedName, err)
-			})
+			// An unparsable timestamp disables the preempt cool-down for the job, so it must not be silent.
+			log.InfraLogger.Warningf("Failed to parse preemption timestamp for podgroup <%s> err: %v",
+				pgi.NamespacedName, err)
 		} else {
 			pgi.LastPreemptionTimestamp = &preemptionTime
 		}
