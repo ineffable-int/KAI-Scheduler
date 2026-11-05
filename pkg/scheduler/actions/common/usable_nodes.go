@@ -5,8 +5,10 @@ package common
 
 import (
 	"context"
+	"fmt"
 	"math"
 	"slices"
+	"time"
 
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
@@ -440,6 +442,11 @@ func (s *VictimFilterStats) log(ssn *framework.Session, preemptor *podgroup_info
 	if s.ExcludedJobs == 0 {
 		return
 	}
+	decision := fmt.Sprintf("usable_nodes=%d victim_jobs=%d excluded_jobs=%d excluded_pods=%d",
+		s.UsableNodes, s.CandidateJobs, s.ExcludedJobs, s.ExcludedPods)
+	if !victimFilterLogs.allow(preemptor.NamespacedName+" "+string(action), decision, time.Now()) {
+		return
+	}
 	sample := make([]string, 0, len(s.ExcludedNodes))
 	for _, name := range s.ExcludedNodes {
 		gpuType := "none"
@@ -451,10 +458,8 @@ func (s *VictimFilterStats) log(ssn *framework.Session, preemptor *podgroup_info
 		sample = append(sample, name+"("+gpuType+")")
 	}
 	// TODO(II-2486): remove after rollout verification
-	log.InfraLogger.Infof("[victim-filter] preemptor=%s/%s action=%s nodes=%d usable_nodes=%d "+
-		"victim_jobs=%d excluded_jobs=%d excluded_pods=%d excluded_nodes_sample=%v",
-		preemptor.Namespace, preemptor.Name, action, len(ssn.ClusterInfo.Nodes), s.UsableNodes,
-		s.CandidateJobs, s.ExcludedJobs, s.ExcludedPods, sample)
+	log.InfraLogger.Infof("[victim-filter] preemptor=%s/%s action=%s nodes=%d %s excluded_nodes_sample=%v",
+		preemptor.Namespace, preemptor.Name, action, len(ssn.ClusterInfo.Nodes), decision, sample)
 }
 
 func aliveTasks(job *podgroup_info.PodGroupInfo) int {
