@@ -39,10 +39,15 @@ const preemptCooldownClockSkew = 2 * time.Second
 type preemptCooldown struct {
 	ssn      *framework.Session
 	cooldown time.Duration
-	// releasingSince holds, for every terminating pod in the session, its deletion timestamp; a pod evicted in
-	// this session (not deleted yet) has the zero time. Collected on first use.
-	releasingSince []time.Time
-	collected      bool
+	// releasingDeleted holds, for every terminating pod in the session, its deletion timestamp; a pod evicted in
+	// this session (not deleted yet) has the zero time. Collected on first use, together with the two
+	// summaries below that make blocks constant-time.
+	releasingDeleted []time.Time
+	// anyNotDeleted: some terminating pod has no deletion timestamp yet.
+	anyNotDeleted bool
+	// latestDeleted is the latest deletion timestamp among the terminating pods (zero when there is none).
+	latestDeleted time.Time
+	collected     bool
 }
 
 func newPreemptCooldown(ssn *framework.Session) *preemptCooldown {
@@ -57,8 +62,9 @@ func (pc *preemptCooldown) blocks(job *podgroup_info.PodGroupInfo, now time.Time
 	if end == nil || !now.Before(*end) {
 		return false
 	}
-	releasing := pc.terminatingSince(*job.LastPreemptionTimestamp)
-	if releasing == 0 {
+	since := cooldownSince(*job.LastPreemptionTimestamp)
+	pc.collect()
+	if !pc.anyNotDeleted && pc.latestDeleted.Before(since) {
 		job.LastPreemptionTimestamp = nil
 		// TODO(II-2486): remove after rollout verification.
 		log.InfraLogger.Infof("[preempt-cooldown] window for job <%s> ended early: its victims are gone",
@@ -69,32 +75,48 @@ func (pc *preemptCooldown) blocks(job *podgroup_info.PodGroupInfo, now time.Time
 		// TODO(II-2486): remove after rollout verification.
 		log.InfraLogger.Infof(
 			"[preempt-cooldown] skipping job <%s> as preemptor: seconds_left=%d releasing_victims=%d",
-			job.NamespacedName, int(end.Sub(now).Seconds()), releasing)
+			job.NamespacedName, int(end.Sub(now).Seconds()), pc.countTerminatingSince(since))
 	}
 	return true
 }
 
-// terminatingSince counts terminating pods deleted at or after since. Annotation timestamps have second
-// precision, so since is truncated to the second, after allowing for preemptCooldownClockSkew.
-func (pc *preemptCooldown) terminatingSince(since time.Time) int {
-	if !pc.collected {
-		pc.collected = true
-		for _, node := range pc.ssn.ClusterInfo.Nodes {
-			for _, pod := range node.PodInfos {
-				if pod.Status != pod_status.Releasing && pod.Status != pod_status.StuckInReleasing {
-					continue
-				}
-				var deleted time.Time
-				if pod.Pod != nil && pod.Pod.DeletionTimestamp != nil {
-					deleted = pod.Pod.DeletionTimestamp.Time
-				}
-				pc.releasingSince = append(pc.releasingSince, deleted)
+// cooldownSince is the earliest deletion time of a pod evicted by a preemption recorded at last. Annotation
+// timestamps have second precision, so it is truncated to the second, after allowing for
+// preemptCooldownClockSkew.
+func cooldownSince(last time.Time) time.Time {
+	return last.Add(-preemptCooldownClockSkew).Truncate(time.Second)
+}
+
+// collect gathers the terminating pods of the session once.
+func (pc *preemptCooldown) collect() {
+	if pc.collected {
+		return
+	}
+	pc.collected = true
+	for _, node := range pc.ssn.ClusterInfo.Nodes {
+		for _, pod := range node.PodInfos {
+			if pod.Status != pod_status.Releasing && pod.Status != pod_status.StuckInReleasing {
+				continue
+			}
+			var deleted time.Time
+			if pod.Pod != nil && pod.Pod.DeletionTimestamp != nil {
+				deleted = pod.Pod.DeletionTimestamp.Time
+			}
+			pc.releasingDeleted = append(pc.releasingDeleted, deleted)
+			if deleted.IsZero() {
+				pc.anyNotDeleted = true
+			} else if deleted.After(pc.latestDeleted) {
+				pc.latestDeleted = deleted
 			}
 		}
 	}
-	since = since.Add(-preemptCooldownClockSkew).Truncate(time.Second)
+}
+
+// countTerminatingSince counts terminating pods deleted at or after since (or not deleted yet). It is only
+// needed for the log line, so it is not on the path of blocks.
+func (pc *preemptCooldown) countTerminatingSince(since time.Time) int {
 	count := 0
-	for _, deleted := range pc.releasingSince {
+	for _, deleted := range pc.releasingDeleted {
 		if deleted.IsZero() || !deleted.Before(since) {
 			count++
 		}
