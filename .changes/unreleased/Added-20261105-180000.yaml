@@ -1,0 +1,3 @@
+kind: Added
+body: 'Scheduler flag `--preempt-cooldown` (default 3m, 0 disables): after a job preempts, it may not preempt again while its victims are still terminating'
+time: 2026-11-05T18:00:00.000000000Z

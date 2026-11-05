@@ -1933,3 +1933,38 @@ func TestSetPodGroupLastEvictionTimestamp(t *testing.T) {
 		})
 	}
 }
+
+// TestLastPreemptionTimestampSurvivesRestart: the preempt cool-down lives on the PodGroup annotation, so a
+// scheduler that starts mid-window (and rebuilds its jobs from the PodGroups) still honours it.
+func TestLastPreemptionTimestampSurvivesRestart(t *testing.T) {
+	preemption := time.Date(2026, 11, 5, 12, 0, 0, 0, time.UTC)
+
+	tests := []struct {
+		name       string
+		annotation string
+		expected   *time.Time
+	}{
+		{name: "valid annotation", annotation: preemption.Format(time.RFC3339), expected: &preemption},
+		{name: "invalid annotation", annotation: "not-a-time", expected: nil},
+		{name: "missing annotation", annotation: "", expected: nil},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			pg := &enginev2alpha2.PodGroup{}
+			if tt.annotation != "" {
+				pg.Annotations = map[string]string{commonconstants.LastPreemptorTimeStamp: tt.annotation}
+			}
+
+			pgi := NewPodGroupInfo("test-uid")
+			pgi.SetPodGroup(pg)
+
+			assert.Equal(t, tt.expected, pgi.LastPreemptionTimestamp)
+			if tt.expected != nil {
+				end := pgi.PreemptCooldownEnd(3 * time.Minute)
+				assert.Equal(t, preemption.Add(3*time.Minute), *end)
+				assert.Nil(t, pgi.PreemptCooldownEnd(0), "cooldown 0 disables the window")
+			}
+		})
+	}
+}

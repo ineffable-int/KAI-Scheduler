@@ -20,6 +20,8 @@ limitations under the License.
 package preempt
 
 import (
+	"time"
+
 	"golang.org/x/exp/maps"
 
 	"github.com/kai-scheduler/KAI-scheduler/pkg/scheduler/actions/common"
@@ -98,8 +100,11 @@ func (alloc *preemptAction) Execute(ssn *framework.Session) {
 			log.InfraLogger.V(3).Infof(
 				"Successfully preempted for job <%s/%s>, preempted tasks: <%v>",
 				job.Namespace, job.Name, preemptedTasksNames)
+			committedAt := time.Now()
 			if err := statement.Commit(); err != nil {
 				log.InfraLogger.Errorf("Failed to commit preemption statement: %v", err)
+			} else {
+				utils.RecordPreemption(ssn, job, committedAt, len(preemptedTasksNames))
 			}
 		} else if shouldStopActionForSearchResult(searchResult) {
 			return

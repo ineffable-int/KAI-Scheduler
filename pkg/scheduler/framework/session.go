@@ -520,11 +520,29 @@ func openSession(cache cache.Cache, sessionId string, schedulerParams conf.Sched
 	}
 
 	ssn.ClusterInfo = snapshot
+	ssn.clearElapsedPreemptCooldowns(time.Now())
 
 	log.InfraLogger.V(2).Infof("Session %v with <%d> Jobs, <%d> Queues and <%d> Nodes",
 		ssn.ID, len(ssn.ClusterInfo.PodGroupInfos), len(ssn.ClusterInfo.Queues), len(ssn.ClusterInfo.Nodes))
 
 	return ssn, nil
+}
+
+// clearElapsedPreemptCooldowns clears the persisted preempt cool-down of every job whose window is over, or all
+// of them when the cool-down is disabled. The actions only look at pending jobs, so without this sweep the
+// timestamp (and its PodGroup annotation) of a job that is running again would never be removed.
+func (ssn *Session) clearElapsedPreemptCooldowns(now time.Time) {
+	for _, job := range ssn.ClusterInfo.PodGroupInfos {
+		if job.LastPreemptionTimestamp == nil {
+			continue
+		}
+		end := job.PreemptCooldownEnd(ssn.PreemptCooldown())
+		if end == nil || !now.Before(*end) {
+			job.LastPreemptionTimestamp = nil
+			// TODO(II-2486): remove after rollout verification.
+			log.InfraLogger.Infof("[preempt-cooldown] window for job <%s> expired", job.NamespacedName)
+		}
+	}
 }
 
 func closeSession(ssn *Session) {
@@ -597,6 +615,12 @@ func (ssn *Session) NodePoolName() string {
 
 func (ssn *Session) AllowConsolidatingReclaim() bool {
 	return ssn.SchedulerParams.AllowConsolidatingReclaim
+}
+
+// PreemptCooldown is how long a job whose preemption succeeded may not trigger another one while pods
+// evicted since then are still terminating; 0 disables it.
+func (ssn *Session) PreemptCooldown() time.Duration {
+	return ssn.SchedulerParams.PreemptCooldown
 }
 
 func (ssn *Session) GetGlobalDefaultStalenessGracePeriod() time.Duration {

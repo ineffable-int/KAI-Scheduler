@@ -71,6 +71,7 @@ type ServerOption struct {
 	NumOfStatusRecordingWorkers       int
 	GlobalDefaultStalenessGracePeriod time.Duration
 	StuckInReleasingThreshold         time.Duration
+	PreemptCooldown                   time.Duration
 	PluginServerPort                  int
 	CPUWorkerNodeLabelKey             string
 	GPUWorkerNodeLabelKey             string
@@ -129,6 +130,7 @@ func (s *ServerOption) AddFlags(fs *pflag.FlagSet) {
 	fs.IntVar(&s.NumOfStatusRecordingWorkers, "num-of-status-recording-workers", defaultNumOfStatusRecordingWorkers, "specifies the max number of go routines spawned to update pod and podgroups conditions and events. Defaults to 5")
 	fs.DurationVar(&s.GlobalDefaultStalenessGracePeriod, "default-staleness-grace-period", defaultStalenessGracePeriod, "Global default staleness grace period duration. Negative values means infinite. Defaults to 60s")
 	fs.DurationVar(&s.StuckInReleasingThreshold, "stuck-in-releasing-threshold", constants.DefaultStuckInReleasingThreshold, "Duration after a Running pod's deletionTimestamp before its resources are excluded from pipelining. Defaults to 2m.")
+	fs.DurationVar(&s.PreemptCooldown, "preempt-cooldown", constants.DefaultPreemptCooldown, "After a job's preemption or reclaim succeeds, the job may not trigger another one for this long while pods evicted since then are still terminating. 0 disables. Defaults to 3m.")
 	fs.IntVar(&s.PluginServerPort, "plugin-server-port", 8081, "The port to bind for plugin server requests")
 	fs.StringVar(&s.CPUWorkerNodeLabelKey, "cpu-worker-node-label-key", constants.DefaultCPUWorkerNodeLabelKey, "The label key for CPU worker nodes")
 	fs.StringVar(&s.GPUWorkerNodeLabelKey, "gpu-worker-node-label-key", constants.DefaultGPUWorkerNodeLabelKey, "The label key for GPU worker nodes")
