@@ -10,12 +10,14 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"go.uber.org/mock/gomock"
 
 	schedulingv1alpha2 "github.com/kai-scheduler/KAI-scheduler/pkg/apis/scheduling/v1alpha2"
 	"github.com/kai-scheduler/KAI-scheduler/pkg/scheduler/api"
 	"github.com/kai-scheduler/KAI-scheduler/pkg/scheduler/api/bindrequest_info"
 	"github.com/kai-scheduler/KAI-scheduler/pkg/scheduler/api/common_info"
+	"github.com/kai-scheduler/KAI-scheduler/pkg/scheduler/api/podgroup_info"
 	scheduler_cache "github.com/kai-scheduler/KAI-scheduler/pkg/scheduler/cache"
 	"github.com/kai-scheduler/KAI-scheduler/pkg/scheduler/conf"
 )
@@ -61,6 +63,40 @@ func TestCloseSessionReleasesSnapshotReferencesWhileSessionIsLive(t *testing.T) 
 	closeSession(ssn)
 
 	requireFinalized(t, finalized, ssn)
+}
+
+func TestOpenSessionClearsElapsedPreemptCooldowns(t *testing.T) {
+	now := time.Now()
+	for _, tt := range []struct {
+		name      string
+		cooldown  time.Duration
+		preempted time.Duration // how long before now the job last preempted
+		wantKept  bool
+	}{
+		{name: "window elapsed", cooldown: 3 * time.Minute, preempted: 5 * time.Minute},
+		{name: "inside the window", cooldown: 3 * time.Minute, preempted: time.Minute, wantKept: true},
+		{name: "cool-down disabled", cooldown: 0, preempted: time.Minute},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			preempted := now.Add(-tt.preempted)
+			job := podgroup_info.NewPodGroupInfo("job")
+			job.LastPreemptionTimestamp = &preempted
+			cacheMock := scheduler_cache.NewMockCache(gomock.NewController(t))
+			cacheMock.EXPECT().Snapshot().Return(&api.ClusterInfo{
+				PodGroupInfos: map[common_info.PodGroupID]*podgroup_info.PodGroupInfo{"job": job},
+			}, nil)
+
+			ssn, err := openSession(cacheMock, "test", conf.SchedulerParams{PreemptCooldown: tt.cooldown}, nil)
+			require.NoError(t, err)
+			t.Cleanup(ssn.releaseNodeScoringPool)
+
+			if tt.wantKept {
+				assert.Equal(t, &preempted, job.LastPreemptionTimestamp)
+			} else {
+				assert.Nil(t, job.LastPreemptionTimestamp)
+			}
+		})
+	}
 }
 
 func BenchmarkOpenCloseSessionWithLargeSnapshot(b *testing.B) {
