@@ -504,9 +504,7 @@ func (su *defaultStatusUpdater) updatePodGroupAnnotations(job *podgroup_info.Pod
 	updatedStaleTime := setPodGroupStaleTimeStamp(job.PodGroup, job.StalenessInfo.TimeStamp)
 	updatedStartTime := setPodGroupLastStartTimeStamp(job.PodGroup, job.LastStartTimestamp)
 	updatedEvictionTime := setPodGroupLastEvictionTimeStamp(job.PodGroup, job.LastEvictionTimestamp)
-	updatedPreemptionTime := setPodGroupTimeStampAnnotation(
-		job.PodGroup, commonconstants.LastPreemptorTimeStamp, job.LastPreemptionTimestamp)
-	if !updatedStaleTime && !updatedStartTime && !updatedEvictionTime && !updatedPreemptionTime {
+	if !updatedStaleTime && !updatedStartTime && !updatedEvictionTime {
 		return nil, nil
 	}
 
@@ -652,28 +650,6 @@ func setPodGroupLastEvictionTimeStamp(podGroup *enginev2alpha2.PodGroup, evictio
 	}
 
 	podGroup.Annotations[commonconstants.LastEvictionTimeStamp] = evictionTimeStamp.UTC().Format(time.RFC3339)
-	return true
-}
-
-// setPodGroupTimeStampAnnotation sets (or, for nil, removes) an RFC3339 timestamp annotation and reports whether
-// it changed.
-func setPodGroupTimeStampAnnotation(podGroup *enginev2alpha2.PodGroup, key string, timeStamp *time.Time) bool {
-	current, found := podGroup.Annotations[key]
-	if timeStamp == nil {
-		if !found {
-			return false
-		}
-		delete(podGroup.Annotations, key)
-		return true
-	}
-	value := timeStamp.UTC().Format(time.RFC3339)
-	if found && current == value {
-		return false
-	}
-	if podGroup.Annotations == nil {
-		podGroup.Annotations = make(map[string]string)
-	}
-	podGroup.Annotations[key] = value
 	return true
 }
 

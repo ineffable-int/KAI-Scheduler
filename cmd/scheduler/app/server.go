@@ -111,6 +111,7 @@ func BuildSchedulerParams(opt *options.ServerOption) *conf.SchedulerParams {
 		SchedulePeriod:                    opt.SchedulePeriod,
 		StuckInReleasingThreshold:         opt.StuckInReleasingThreshold,
 		PreemptCooldown:                   opt.PreemptCooldown,
+		PreemptCooldowns:                  conf.NewPreemptCooldowns(),
 		DetailedFitErrors:                 opt.DetailedFitErrors,
 		UpdatePodEvictionCondition:        opt.UpdatePodEvictionCondition,
 		QueueLabelKey:                     opt.QueueLabelKey,

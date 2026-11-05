@@ -1934,37 +1934,21 @@ func TestSetPodGroupLastEvictionTimestamp(t *testing.T) {
 	}
 }
 
-// TestLastPreemptionTimestampSurvivesRestart: the preempt cool-down lives on the PodGroup annotation, so a
-// scheduler that starts mid-window (and rebuilds its jobs from the PodGroups) still honours it.
-func TestLastPreemptionTimestampSurvivesRestart(t *testing.T) {
+func TestPreemptCooldownEnd(t *testing.T) {
 	preemption := time.Date(2026, 11, 5, 12, 0, 0, 0, time.UTC)
+	pgi := NewPodGroupInfo("test-uid")
+	assert.Nil(t, pgi.PreemptCooldownEnd(3*time.Minute), "never preempted")
 
-	tests := []struct {
-		name       string
-		annotation string
-		expected   *time.Time
-	}{
-		{name: "valid annotation", annotation: preemption.Format(time.RFC3339), expected: &preemption},
-		{name: "invalid annotation", annotation: "not-a-time", expected: nil},
-		{name: "missing annotation", annotation: "", expected: nil},
-	}
+	pgi.LastPreemptionTimestamp = &preemption
+	assert.Equal(t, preemption.Add(3*time.Minute), *pgi.PreemptCooldownEnd(3 * time.Minute))
+	assert.Nil(t, pgi.PreemptCooldownEnd(0), "cooldown 0 disables the window")
+}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			pg := &enginev2alpha2.PodGroup{}
-			if tt.annotation != "" {
-				pg.Annotations = map[string]string{commonconstants.LastPreemptorTimeStamp: tt.annotation}
-			}
+func TestPreemptCooldownKey(t *testing.T) {
+	pgi := NewPodGroupInfo("test-uid")
+	pgi.NamespacedName = "ns/pg"
+	assert.Equal(t, "ns/pg", pgi.PreemptCooldownKey(), "no PodGroup yet")
 
-			pgi := NewPodGroupInfo("test-uid")
-			pgi.SetPodGroup(pg)
-
-			assert.Equal(t, tt.expected, pgi.LastPreemptionTimestamp)
-			if tt.expected != nil {
-				end := pgi.PreemptCooldownEnd(3 * time.Minute)
-				assert.Equal(t, preemption.Add(3*time.Minute), *end)
-				assert.Nil(t, pgi.PreemptCooldownEnd(0), "cooldown 0 disables the window")
-			}
-		})
-	}
+	pgi.SetPodGroup(&enginev2alpha2.PodGroup{ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "pg", UID: "uid-1"}})
+	assert.Equal(t, "uid-1", pgi.PreemptCooldownKey(), "a PodGroup recreated under the same name gets a new key")
 }

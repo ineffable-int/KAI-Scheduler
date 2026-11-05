@@ -26,6 +26,7 @@ func RecordPreemption(ssn *framework.Session, job *podgroup_info.PodGroupInfo, a
 		return
 	}
 	job.LastPreemptionTimestamp = &at
+	ssn.SchedulerParams.PreemptCooldowns.Record(job.PreemptCooldownKey(), at)
 	// TODO(II-2486): remove after rollout verification.
 	log.InfraLogger.Infof("[preempt-cooldown] recorded preemption for job <%s>: victims=%d window_end=%s",
 		job.NamespacedName, victims, at.Add(cooldown).UTC().Format(time.RFC3339))
@@ -64,6 +65,7 @@ func (pc *preemptCooldown) blocks(job *podgroup_info.PodGroupInfo, now time.Time
 	pc.collect()
 	if !pc.anyNotDeleted && pc.latestDeleted.Before(since) {
 		job.LastPreemptionTimestamp = nil
+		pc.ssn.SchedulerParams.PreemptCooldowns.Forget(job.PreemptCooldownKey())
 		// TODO(II-2486): remove after rollout verification.
 		log.InfraLogger.Infof("[preempt-cooldown] window for job <%s> ended early: its victims are gone",
 			job.NamespacedName)

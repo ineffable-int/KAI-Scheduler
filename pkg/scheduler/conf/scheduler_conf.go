@@ -45,9 +45,11 @@ type SchedulerParams struct {
 	SchedulePeriod                    time.Duration               `json:"schedulePeriod,omitempty"`
 	StuckInReleasingThreshold         time.Duration               `json:"stuckInReleasingThreshold,omitempty"`
 	PreemptCooldown                   time.Duration               `json:"preemptCooldown,omitempty"`
-	DetailedFitErrors                 bool                        `json:"detailedFitErrors,omitempty"`
-	UpdatePodEvictionCondition        bool                        `json:"updatePodEvictionCondition,omitempty"`
-	QueueLabelKey                     string                      `json:"queueLabelKey,omitempty"`
+	// PreemptCooldowns carries open preempt cool-down windows from one session to the next.
+	PreemptCooldowns           *PreemptCooldowns `json:"-"`
+	DetailedFitErrors          bool              `json:"detailedFitErrors,omitempty"`
+	UpdatePodEvictionCondition bool              `json:"updatePodEvictionCondition,omitempty"`
+	QueueLabelKey              string            `json:"queueLabelKey,omitempty"`
 }
 
 // SchedulerConfiguration defines the configuration of scheduler.

@@ -65,38 +65,65 @@ func TestCloseSessionReleasesSnapshotReferencesWhileSessionIsLive(t *testing.T) 
 	requireFinalized(t, finalized, ssn)
 }
 
-func TestOpenSessionClearsElapsedPreemptCooldowns(t *testing.T) {
+// TestOpenSessionLoadsPreemptCooldowns: open windows carry over from the scheduler's in-memory store to the
+// next session's jobs; ended windows and deleted jobs leave the store.
+func TestOpenSessionLoadsPreemptCooldowns(t *testing.T) {
 	now := time.Now()
 	for _, tt := range []struct {
 		name      string
 		cooldown  time.Duration
 		preempted time.Duration // how long before now the job last preempted
-		wantKept  bool
+		deleted   bool          // the job is no longer in the snapshot
+		wantOpen  bool
 	}{
+		{name: "inside the window", cooldown: 3 * time.Minute, preempted: time.Minute, wantOpen: true},
 		{name: "window elapsed", cooldown: 3 * time.Minute, preempted: 5 * time.Minute},
-		{name: "inside the window", cooldown: 3 * time.Minute, preempted: time.Minute, wantKept: true},
 		{name: "cool-down disabled", cooldown: 0, preempted: time.Minute},
+		{name: "job deleted", cooldown: 3 * time.Minute, preempted: time.Minute, deleted: true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			preempted := now.Add(-tt.preempted)
 			job := podgroup_info.NewPodGroupInfo("job")
-			job.LastPreemptionTimestamp = &preempted
+			job.NamespacedName = "ns/job"
+			store := conf.NewPreemptCooldowns()
+			store.Record(job.PreemptCooldownKey(), preempted)
+			jobs := map[common_info.PodGroupID]*podgroup_info.PodGroupInfo{"job": job}
+			if tt.deleted {
+				jobs = nil
+			}
 			cacheMock := scheduler_cache.NewMockCache(gomock.NewController(t))
-			cacheMock.EXPECT().Snapshot().Return(&api.ClusterInfo{
-				PodGroupInfos: map[common_info.PodGroupID]*podgroup_info.PodGroupInfo{"job": job},
-			}, nil)
+			cacheMock.EXPECT().Snapshot().Return(&api.ClusterInfo{PodGroupInfos: jobs}, nil)
 
-			ssn, err := openSession(cacheMock, "test", conf.SchedulerParams{PreemptCooldown: tt.cooldown}, nil)
+			ssn, err := openSession(cacheMock, "test",
+				conf.SchedulerParams{PreemptCooldown: tt.cooldown, PreemptCooldowns: store}, nil)
 			require.NoError(t, err)
 			t.Cleanup(ssn.releaseNodeScoringPool)
 
-			if tt.wantKept {
-				assert.Equal(t, &preempted, job.LastPreemptionTimestamp)
+			if tt.wantOpen {
+				assert.Equal(t, preempted, *job.LastPreemptionTimestamp)
 			} else {
 				assert.Nil(t, job.LastPreemptionTimestamp)
 			}
+			// What the store still holds is what the next session would see.
+			again := store.Open(now, 3*time.Minute, func(string) bool { return true })
+			assert.Equal(t, tt.wantOpen, len(again) == 1)
 		})
 	}
+}
+
+// TestOpenSessionWithoutPreemptCooldownStore: sessions built without a store (tests, snapshot replays) keep no
+// windows between sessions.
+func TestOpenSessionWithoutPreemptCooldownStore(t *testing.T) {
+	job := podgroup_info.NewPodGroupInfo("job")
+	cacheMock := scheduler_cache.NewMockCache(gomock.NewController(t))
+	cacheMock.EXPECT().Snapshot().Return(&api.ClusterInfo{
+		PodGroupInfos: map[common_info.PodGroupID]*podgroup_info.PodGroupInfo{"job": job},
+	}, nil)
+
+	ssn, err := openSession(cacheMock, "test", conf.SchedulerParams{PreemptCooldown: 3 * time.Minute}, nil)
+	require.NoError(t, err)
+	t.Cleanup(ssn.releaseNodeScoringPool)
+	assert.Nil(t, job.LastPreemptionTimestamp)
 }
 
 func BenchmarkOpenCloseSessionWithLargeSnapshot(b *testing.B) {
