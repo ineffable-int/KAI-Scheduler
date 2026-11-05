@@ -4,6 +4,7 @@
 package common
 
 import (
+	"slices"
 	"testing"
 
 	"github.com/kai-scheduler/KAI-scheduler/pkg/scheduler/api/common_info"
@@ -40,5 +41,29 @@ func TestPodsThatFitAbsorbsFloatError(t *testing.T) {
 	}
 	if got := podsThatFit(node, victims, 1); got != 7 {
 		t.Errorf("podsThatFit = %d, want 7", got)
+	}
+}
+
+// The excluded-pod count covers alive pods only, and the node sample is the first names in order
+// whatever the order the tasks are visited in.
+func TestCountExcludedAliveOnlyAndSortedSample(t *testing.T) {
+	var tasks []*pod_info.PodInfo
+	for i, node := range []string{"n5", "n3", "n9", "n1", "n3", "n7"} {
+		status := pod_status.Running
+		if node == "n7" {
+			status = pod_status.Succeeded
+		}
+		tasks = append(tasks, &pod_info.PodInfo{UID: common_info.PodID(string(rune('a' + i))), NodeName: node, Status: status})
+	}
+	job := podgroup_info.NewPodGroupInfo("victim", tasks...)
+
+	var stats VictimFilterStats
+	stats.countExcluded(job)
+
+	if stats.ExcludedJobs != 1 || stats.ExcludedPods != 5 {
+		t.Errorf("ExcludedJobs, ExcludedPods = %d, %d, want 1, 5", stats.ExcludedJobs, stats.ExcludedPods)
+	}
+	if want := []string{"n1", "n3", "n5"}; !slices.Equal(stats.ExcludedNodes, want) {
+		t.Errorf("ExcludedNodes = %v, want %v", stats.ExcludedNodes, want)
 	}
 }

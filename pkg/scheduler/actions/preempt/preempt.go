@@ -184,6 +184,8 @@ func getOrderedVictimsQueue(ssn *framework.Session, preemptor *podgroup_info.Pod
 		ssn,
 		func() map[common_info.PodGroupID]*podgroup_info.PodGroupInfo {
 			candidates := utils.GetVictimCandidates(ssn, buildFilterFuncForPreempt(ssn, preemptor))
+			// Drops victims that free nothing the preemptor can use. A nil usable-node set (no
+			// restriction) keeps every candidate; an empty one drops them all.
 			common.FilterVictimsToUsableNodes(ssn, preemptor, candidates, framework.Preempt)
 			return candidates
 		},

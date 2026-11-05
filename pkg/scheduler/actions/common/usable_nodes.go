@@ -6,7 +6,7 @@ package common
 import (
 	"context"
 	"math"
-	"sort"
+	"slices"
 
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
@@ -32,6 +32,9 @@ const gpuTypeLabel = "cloud.google.com/gke-accelerator"
 // FilterVictimsToUsableNodes removes from candidates the victim jobs that have no alive task on a
 // node the preemptor could use (see NodesUsableByJob): evicting them frees nothing the preemptor
 // can use. It returns what it removed.
+//
+// NodesUsableByJob returns nil when the preemptor places no restriction on nodes: every candidate
+// is kept. An empty non-nil set means no node is usable: every candidate is excluded.
 func FilterVictimsToUsableNodes(
 	ssn *framework.Session, preemptor *podgroup_info.PodGroupInfo,
 	candidates map[common_info.PodGroupID]*podgroup_info.PodGroupInfo, action framework.ActionType,
@@ -50,7 +53,7 @@ func FilterVictimsToUsableNodes(
 				stats.countExcluded(job)
 			} else if trimmed := withoutTasksOffNodes(job, usable); trimmed != nil {
 				candidates[id] = trimmed
-				stats.ExcludedPods += len(job.GetAllPodsMap()) - len(trimmed.GetAllPodsMap())
+				stats.ExcludedPods += aliveTasks(job) - len(trimmed.GetAllPodsMap())
 			}
 		}
 	}
@@ -193,13 +196,15 @@ func JobHasTaskOnNodes(job *podgroup_info.PodGroupInfo, nodes sets.Set[string]) 
 }
 
 func nodeFilters(ssn *framework.Session) []k8s_internal.NodeFilter {
+	// Sessions built without a cache (some unit tests) have no k8s plugins: only the node
+	// condition check applies then.
 	if ssn.Cache == nil || ssn.InternalK8sPlugins() == nil {
 		return nil
 	}
 	plugins := ssn.InternalK8sPlugins()
 	var filters []k8s_internal.NodeFilter
 	for _, plugin := range []ksf.Plugin{plugins.NodeAffinity, plugins.TaintToleration} {
-		if filter, ok := plugin.(k8s_internal.NodeFilter); ok && filter != nil {
+		if filter, ok := plugin.(k8s_internal.NodeFilter); ok {
 			filters = append(filters, filter)
 		}
 	}
@@ -408,7 +413,7 @@ type VictimFilterStats struct {
 	UsableNodes   int
 	ExcludedJobs  int
 	ExcludedPods  int
-	// ExcludedNodes holds up to 3 nodes of excluded pods.
+	// ExcludedNodes holds the 3 first node names, in order, of excluded pods.
 	ExcludedNodes []string
 }
 
@@ -419,8 +424,12 @@ func (s *VictimFilterStats) countExcluded(job *podgroup_info.PodGroupInfo) {
 			continue
 		}
 		s.ExcludedPods++
-		if len(s.ExcludedNodes) < 3 && task.NodeName != "" && !containsString(s.ExcludedNodes, task.NodeName) {
+		if task.NodeName != "" && !slices.Contains(s.ExcludedNodes, task.NodeName) {
 			s.ExcludedNodes = append(s.ExcludedNodes, task.NodeName)
+			slices.Sort(s.ExcludedNodes)
+			if len(s.ExcludedNodes) > 3 {
+				s.ExcludedNodes = s.ExcludedNodes[:3]
+			}
 		}
 	}
 }
@@ -434,7 +443,6 @@ func (s *VictimFilterStats) log(ssn *framework.Session, preemptor *podgroup_info
 		return
 	}
 	sample := make([]string, 0, len(s.ExcludedNodes))
-	sort.Strings(s.ExcludedNodes)
 	for _, name := range s.ExcludedNodes {
 		gpuType := "none"
 		if node := ssn.ClusterInfo.Nodes[name]; node != nil && node.Node != nil {
@@ -451,11 +459,12 @@ func (s *VictimFilterStats) log(ssn *framework.Session, preemptor *podgroup_info
 		s.CandidateJobs, s.ExcludedJobs, s.ExcludedPods, sample)
 }
 
-func containsString(values []string, value string) bool {
-	for _, v := range values {
-		if v == value {
-			return true
+func aliveTasks(job *podgroup_info.PodGroupInfo) int {
+	alive := 0
+	for _, task := range job.GetAllPodsMap() {
+		if pod_status.IsAliveStatus(task.Status) {
+			alive++
 		}
 	}
-	return false
+	return alive
 }
