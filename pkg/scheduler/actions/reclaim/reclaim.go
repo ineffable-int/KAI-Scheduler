@@ -20,6 +20,8 @@ limitations under the License.
 package reclaim
 
 import (
+	"time"
+
 	"golang.org/x/exp/maps"
 
 	"github.com/kai-scheduler/KAI-scheduler/pkg/scheduler/actions/common"
@@ -100,8 +102,11 @@ func (ra *reclaimAction) Execute(ssn *framework.Session) {
 				"Reclaimed resources for job <%s/%s>, evicting reclaimee tasks: <%v>.",
 				job.Namespace, job.Name, reclaimeeTasksNames,
 			)
+			committedAt := time.Now()
 			if err := statement.Commit(); err != nil {
 				log.InfraLogger.Errorf("Failed to commit reclaim statement: %v", err)
+			} else {
+				utils.RecordPreemption(ssn, job, committedAt, len(reclaimeeTasksNames))
 			}
 		} else if shouldStopActionForSearchResult(searchResult) {
 			return

@@ -76,8 +76,11 @@ type PodGroupInfo struct {
 	CreationTimestamp     metav1.Time
 	LastStartTimestamp    *time.Time
 	LastEvictionTimestamp *time.Time
-	PodGroup              *enginev2alpha2.PodGroup
-	PodGroupUID           types.UID
+	// LastPreemptionTimestamp is when this job last had a preemption or reclaim committed for it, i.e. when it
+	// last caused other workloads to be evicted. Persisted in the LastPreemptorTimeStamp annotation.
+	LastPreemptionTimestamp *time.Time
+	PodGroup                *enginev2alpha2.PodGroup
+	PodGroupUID             types.UID
 
 	RootSubGroupSet      *subgroup_info.SubGroupSet
 	PodSets              map[string]*subgroup_info.PodSet
@@ -98,6 +101,9 @@ type PodGroupInfo struct {
 	PodStatusIndex                          map[pod_status.PodStatus]pod_info.PodsMap
 	activeAllocatedCount                    *int
 	aliveTasksRequestedGPUs                 *float64
+
+	// TODO(II-2486): remove after rollout verification, with the [preempt-cooldown] log lines.
+	preemptCooldownLogged bool
 }
 
 func NewPodGroupInfo(uid common_info.PodGroupID, tasks ...*pod_info.PodInfo) *PodGroupInfo {
@@ -226,6 +232,25 @@ func (pgi *PodGroupInfo) IsWithinPreemptionDelay(now time.Time) bool {
 	return end != nil && now.Before(*end)
 }
 
+// PreemptCooldownEnd returns when the cool-down after this job's last committed preemption ends, or nil when
+// the job never preempted or cooldown is not positive.
+func (pgi *PodGroupInfo) PreemptCooldownEnd(cooldown time.Duration) *time.Time {
+	if cooldown <= 0 || pgi.LastPreemptionTimestamp == nil {
+		return nil
+	}
+	end := pgi.LastPreemptionTimestamp.Add(cooldown)
+	return &end
+}
+
+// MarkPreemptCooldownLogged reports whether this is the first call in this session (a PodGroupInfo lives for one
+// session), so the cool-down skip is logged at most once per job per session.
+// TODO(II-2486): remove after rollout verification.
+func (pgi *PodGroupInfo) MarkPreemptCooldownLogged() bool {
+	first := !pgi.preemptCooldownLogged
+	pgi.preemptCooldownLogged = true
+	return first
+}
+
 // IsSemiPreemptibleJob reports whether only the job's core (minimal satisfying shape) is protected,
 // leaving everything above it elastic and reclaimed first.
 func (pgi *PodGroupInfo) IsSemiPreemptibleJob() bool {
@@ -286,6 +311,18 @@ func (pgi *PodGroupInfo) SetPodGroup(pg *enginev2alpha2.PodGroup) {
 			})
 		} else {
 			pgi.LastEvictionTimestamp = &evictionTime
+		}
+	}
+
+	if pg.Annotations[commonconstants.LastPreemptorTimeStamp] != "" {
+		preemptionTime, err := time.Parse(time.RFC3339, pg.Annotations[commonconstants.LastPreemptorTimeStamp])
+		if err != nil {
+			log.InfraLogger.V(7).Do(func() {
+				log.InfraLogger.Warningf("Failed to parse preemption timestamp for podgroup <%s> err: %v",
+					pgi.NamespacedName, err)
+			})
+		} else {
+			pgi.LastPreemptionTimestamp = &preemptionTime
 		}
 	}
 

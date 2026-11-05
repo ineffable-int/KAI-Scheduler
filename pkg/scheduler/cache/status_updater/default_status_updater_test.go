@@ -1307,3 +1307,48 @@ func TestUpdateCorePods(t *testing.T) {
 		assert.Nil(t, job.PodGroup.Status.SchedulingState)
 	})
 }
+
+func TestUpdatePodGroupAnnotationsLastPreemptorTimeStamp(t *testing.T) {
+	preemption := time.Date(2026, 11, 5, 12, 0, 0, 0, time.UTC)
+	key := commonconstants.LastPreemptorTimeStamp
+	for _, test := range []struct {
+		name        string
+		annotations map[string]string
+		timeStamp   *time.Time
+		want        *string
+		wantUpdated bool
+	}{
+		{name: "nothing to write", timeStamp: nil, wantUpdated: false},
+		{name: "add", timeStamp: &preemption, want: ptr.To("2026-11-05T12:00:00Z"), wantUpdated: true},
+		{
+			name: "unchanged", annotations: map[string]string{key: "2026-11-05T12:00:00Z"},
+			timeStamp: &preemption, want: ptr.To("2026-11-05T12:00:00Z"), wantUpdated: false,
+		},
+		{
+			name: "update", annotations: map[string]string{key: "2026-11-05T11:00:00Z"},
+			timeStamp: &preemption, want: ptr.To("2026-11-05T12:00:00Z"), wantUpdated: true,
+		},
+		{
+			name: "remove (cool-down ended early)", annotations: map[string]string{key: "2026-11-05T12:00:00Z"},
+			timeStamp: nil, wantUpdated: true,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			job := &podgroup_info.PodGroupInfo{
+				PodGroup:                &enginev2alpha2.PodGroup{ObjectMeta: metav1.ObjectMeta{Annotations: test.annotations}},
+				LastPreemptionTimestamp: test.timeStamp,
+			}
+			su := &defaultStatusUpdater{}
+			patch, err := su.updatePodGroupAnnotations(job)
+			assert.NoError(t, err)
+			assert.Equal(t, test.wantUpdated, patch != nil, "patch: %s", patch)
+
+			value, found := job.PodGroup.Annotations[key]
+			if test.want == nil {
+				assert.False(t, found)
+			} else {
+				assert.Equal(t, *test.want, value)
+			}
+		})
+	}
+}

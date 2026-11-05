@@ -28,6 +28,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 
+	"github.com/kai-scheduler/KAI-scheduler/pkg/common/constants"
 	featuregates "github.com/kai-scheduler/KAI-scheduler/pkg/common/feature_gates"
 	"github.com/kai-scheduler/KAI-scheduler/pkg/scheduler/actions/allocate"
 	"github.com/kai-scheduler/KAI-scheduler/pkg/scheduler/actions/preempt"
@@ -55,7 +56,11 @@ const (
 	victimPriority    = 25
 	preemptorPriority = 50
 
-	gangName = "gang"
+	gangName       = "gang"
+	secondGangName = "gang-b"
+	staleVictim    = "stale-victim"
+
+	defaultSessionPeriod = 10 * time.Second
 
 	hostnameLabel = "kubernetes.io/hostname"
 )
@@ -83,10 +88,25 @@ type scenario struct {
 	preemptionDelay        time.Duration
 	preemptorAge           time.Duration // default 30m
 	pluginArguments        map[string]map[string]string
+	// preemptCooldown is the scheduler's --preempt-cooldown: nil means its default, 0 disables the guard.
+	preemptCooldown *time.Duration
+	// sessionPeriod is the simulated time between two sessions (default 10s). It ages the jobs' preemption
+	// timestamps, the victims' deletion timestamps and how long the victims have been running.
+	sessionPeriod time.Duration
+	// gangMinAvailable makes the gang elastic: only this many of its pods are needed to start (default: all).
+	gangMinAvailable int
+	// secondGangFromCycle > 0 creates a second, identical pending gang before that session.
+	secondGangFromCycle int
+	// withStaleVictim adds a node running one pod of a two-pod victim gang whose other pod is pending, i.e. a
+	// stale gang that stalegangeviction evicts.
+	withStaleVictim bool
 
-	// Expected outcome: evictions in each session, and whether the gang runs at the end.
-	wantEvictions   []int
-	wantGangRunning bool
+	// Expected outcome: evictions in each session, and whether the gang (and the second gang) runs at the end.
+	wantEvictions         []int
+	wantGangRunning       bool
+	wantSecondGangRunning bool
+	// wantGangStates, when set, is the gang's state after each session.
+	wantGangStates []string
 }
 
 // noLoop is the desired behaviour: the gang's first batch of victims is evicted in session 1 and nothing
@@ -99,20 +119,27 @@ func noLoop(firstBatch, cycles int) []int {
 
 func scenarios() []scenario {
 	const nodes, gang, cycles = 16, 4, 5
+	guardOff := time.Duration(0)
 	pipelineOverReleasing := map[string]map[string]string{
 		"dynamicresources": {"pipelineOverReleasingClaims": "true"},
 	}
-	withClaim := func(s scenario) scenario {
-		s.nodes, s.gangSize, s.cycles, s.withChannelClaim = nodes, gang, cycles, true
+	plain := func(s scenario) scenario {
+		s.nodes = nodes
+		if s.gangSize == 0 {
+			s.gangSize = gang
+		}
+		if s.cycles == 0 {
+			s.cycles = cycles
+		}
 		return s
 	}
-	plain := func(s scenario) scenario {
-		s.nodes, s.gangSize, s.cycles = nodes, gang, cycles
-		return s
+	withClaim := func(s scenario) scenario {
+		s.withChannelClaim = true
+		return plain(s)
 	}
 	withAffinity := func(s scenario) scenario {
-		s.nodes, s.gangSize, s.cycles, s.withAntiAffinity = nodes, gang, cycles, true
-		return s
+		s.withAntiAffinity = true
+		return plain(s)
 	}
 	return []scenario{
 		plain(scenario{
@@ -184,6 +211,114 @@ func scenarios() []scenario {
 			wantEvictions:        noLoop(gang, cycles),
 			wantGangRunning:      true,
 		}),
+
+		// Guard off (--preempt-cooldown=0): the deployed scheduler's behaviour.
+		withClaim(scenario{
+			name:            "guard off: gpus + channel claim",
+			preemptCooldown: &guardOff,
+			wantEvictions:   []int{4, 4, 4, 4, 0},
+		}),
+		withAffinity(scenario{
+			name:            "guard off: gpus + required anti-affinity",
+			preemptCooldown: &guardOff,
+			wantEvictions:   []int{4, 4, 4, 4, 0},
+		}),
+		withClaim(scenario{
+			name:                 "guard off: gpus + channel claim, victims gone after 2 sessions",
+			preemptCooldown:      &guardOff,
+			terminatingForCycles: 2,
+			wantEvictions:        []int{4, 4, 0, 0, 0},
+			wantGangRunning:      true,
+		}),
+
+		// Victims finish before the window ends: the gang is placed as soon as they are gone, and allocate keeps
+		// pipelining it onto the releasing GPUs meanwhile.
+		withClaim(scenario{
+			name:                 "gpus + channel claim, victims gone after 1 session",
+			terminatingForCycles: 1,
+			wantEvictions:        noLoop(gang, cycles),
+			wantGangRunning:      true,
+			wantGangStates:       []string{"Pipelined", "Running", "Running", "Running", "Running"},
+		}),
+		plain(scenario{
+			name:                 "gpus only, victims gone after 2 sessions (pipelined during the window)",
+			terminatingForCycles: 2,
+			wantEvictions:        noLoop(gang, cycles),
+			wantGangRunning:      true,
+			wantGangStates:       []string{"Pipelined", "Pipelined", "Running", "Running", "Running"},
+		}),
+
+		// The window bounds the wait: with 1-minute sessions and the 3-minute default, the gang may preempt again
+		// in session 4 if its victims are still terminating, not before.
+		withClaim(scenario{
+			name:          "gpus + channel claim, victims never finish, 1m sessions",
+			sessionPeriod: time.Minute,
+			cycles:        10,
+			wantEvictions: []int{4, 0, 0, 4, 0, 0, 4, 0, 0, 4},
+		}),
+		withClaim(scenario{
+			name:                 "gpus + channel claim, victims stuck terminating 5m, 1m sessions",
+			sessionPeriod:        time.Minute,
+			cycles:               8,
+			terminatingForCycles: 5,
+			wantEvictions:        []int{4, 0, 0, 4, 0, 0, 0, 0},
+			wantGangRunning:      true,
+		}),
+
+		// An elastic gang that needs more victims after its first round.
+		plain(scenario{
+			name:                 "elastic gang (4 of 8 pods), victims gone after 2 sessions",
+			gangSize:             8,
+			gangMinAvailable:     4,
+			terminatingForCycles: 2,
+			wantEvictions:        []int{4, 0, 1, 0, 1}, // elastic pods are preempted for one at a time
+			wantGangRunning:      true,
+		}),
+		plain(scenario{
+			name:             "elastic gang (4 of 8 pods), victims never finish, 1m sessions",
+			gangSize:         8,
+			gangMinAvailable: 4,
+			sessionPeriod:    time.Minute,
+			cycles:           7,
+			wantEvictions:    []int{4, 0, 0, 1, 0, 0, 1},
+		}),
+
+		// The window is per job: a second gang still preempts while the first one waits.
+		withClaim(scenario{
+			name:                  "second gang created in session 2",
+			secondGangFromCycle:   2,
+			terminatingForCycles:  3,
+			wantEvictions:         []int{4, 4, 0, 0, 0},
+			wantGangRunning:       true,
+			wantSecondGangRunning: true,
+		}),
+
+		// preemptionDelay and minruntime still apply and don't combine with the window into starvation.
+		withClaim(scenario{
+			name:                 "preemptionDelay 2m, gang created 1m ago, 1m sessions, victims gone after 2",
+			preemptionDelay:      2 * time.Minute,
+			preemptorAge:         time.Minute,
+			sessionPeriod:        time.Minute,
+			terminatingForCycles: 2,
+			wantEvictions:        []int{0, 4, 0, 0, 0},
+			wantGangRunning:      true,
+		}),
+		withClaim(scenario{
+			name:                   "queue preemptMinRuntime 10m, victims running 9m, 1m sessions, victims gone after 2",
+			queuePreemptMinRuntime: 10 * time.Minute,
+			victimRunningFor:       func(int) time.Duration { return 9 * time.Minute },
+			sessionPeriod:          time.Minute,
+			terminatingForCycles:   2,
+			wantEvictions:          []int{0, 4, 0, 0, 0},
+			wantGangRunning:        true,
+		}),
+
+		// stalegangeviction is not an eviction-triggering job action and is not affected by the window.
+		withClaim(scenario{
+			name:            "stale victim gang",
+			withStaleVictim: true,
+			wantEvictions:   []int{5, 0, 0, 0, 0},
+		}),
 	}
 }
 
@@ -198,7 +333,8 @@ func TestReevictionLoop(t *testing.T) {
 			defer controller.Finish()
 
 			result := runSessions(t, controller, s)
-			t.Logf("evictions per session: %v, gang after each session: %v", result.evictions, result.gangStates)
+			t.Logf("evictions per session: %v, gang after each session: %v, second gang: %v",
+				result.evictions, result.gangStates, result.secondGangStates)
 
 			if !equalInts(result.evictions, s.wantEvictions) {
 				t.Errorf("evictions per session = %v, want %v", result.evictions, s.wantEvictions)
@@ -208,13 +344,24 @@ func TestReevictionLoop(t *testing.T) {
 				t.Errorf("gang running at the end = %v, want %v (states: %v)",
 					gangRunning, s.wantGangRunning, result.gangStates)
 			}
+			if s.wantGangStates != nil && strings.Join(result.gangStates, ",") != strings.Join(s.wantGangStates, ",") {
+				t.Errorf("gang states = %v, want %v", result.gangStates, s.wantGangStates)
+			}
+			if s.secondGangFromCycle > 0 {
+				running := result.secondGangStates[len(result.secondGangStates)-1] == "Running"
+				if running != s.wantSecondGangRunning {
+					t.Errorf("second gang running at the end = %v, want %v (states: %v)",
+						running, s.wantSecondGangRunning, result.secondGangStates)
+				}
+			}
 		})
 	}
 }
 
 type sessionsResult struct {
-	evictions  []int
-	gangStates []string
+	evictions        []int
+	gangStates       []string
+	secondGangStates []string
 }
 
 // cluster is the mutable fake cluster carried from one session to the next.
@@ -222,27 +369,48 @@ type cluster struct {
 	topology test_utils.TestTopologyBasic
 	// terminatingSince: victim job name -> 1-based session in which the victim was evicted.
 	terminatingSince map[string]int
+	// preemptedAt: job name -> 1-based session in which a preemption was committed for the job, i.e. its
+	// LastPreemptionTimestamp annotation (the only state the scheduler keeps between sessions).
+	preemptedAt map[string]int
 }
 
 func runSessions(t *testing.T, controller *Controller, s scenario) sessionsResult {
 	c := buildCluster(s)
 	var result sessionsResult
 	for cycle := 1; cycle <= s.cycles; cycle++ {
+		if cycle == s.secondGangFromCycle {
+			c.addGang(s, secondGangName)
+		}
 		c.deleteTerminatedVictims(s, cycle)
 
 		ssn := test_utils.BuildSession(c.topology, controller)
-		applyJobOverrides(ssn, s)
+		ssn.SchedulerParams.PreemptCooldown = constants.DefaultPreemptCooldown
+		if s.preemptCooldown != nil {
+			ssn.SchedulerParams.PreemptCooldown = *s.preemptCooldown
+		}
+		sessionStart := time.Now()
+		c.applyJobOverrides(ssn, s, cycle, sessionStart)
 		for _, action := range []framework.Action{
 			allocate.New(), reclaim.New(), preempt.New(), stalegangeviction.New(),
 		} {
 			action.Execute(ssn)
 		}
 
-		evicted := c.advance(ssn, cycle)
+		evicted := c.advance(ssn, cycle, sessionStart)
 		result.evictions = append(result.evictions, evicted)
-		result.gangStates = append(result.gangStates, gangState(ssn))
+		result.gangStates = append(result.gangStates, gangState(ssn, gangName))
+		if s.secondGangFromCycle > 0 {
+			result.secondGangStates = append(result.secondGangStates, gangState(ssn, secondGangName))
+		}
 	}
 	return result
+}
+
+func sessionPeriod(s scenario) time.Duration {
+	if s.sessionPeriod > 0 {
+		return s.sessionPeriod
+	}
+	return defaultSessionPeriod
 }
 
 func buildCluster(s scenario) *cluster {
@@ -293,12 +461,45 @@ func buildCluster(s scenario) *cluster {
 		topology.Jobs = append(topology.Jobs, victim)
 	}
 
+	if s.withStaleVictim {
+		nodeName := nodeNameOf(s.nodes)
+		topology.Nodes[nodeName] = nodes_fake.TestNodeBasic{
+			GPUs: gpusPerNode, Labels: map[string]string{hostnameLabel: nodeName},
+		}
+		if s.withChannelClaim {
+			topology.ResourceSlices = append(topology.ResourceSlices, &dra_fake.TestResourceSlice{
+				Name: nodeName + "-channel", DeviceClassName: channelClass, NodeName: nodeName, Count: 1, Driver: channelDriver,
+			})
+		}
+		staleFor := 10 * time.Minute
+		topology.Jobs = append(topology.Jobs, &jobs_fake.TestJobBasic{
+			Name:                staleVictim,
+			Namespace:           namespace,
+			QueueName:           queueName,
+			Priority:            victimPriority,
+			RequiredGPUsPerTask: gpusPerNode,
+			JobAgeInMinutes:     180,
+			RootSubGroupSet:     jobs_fake.DefaultSubGroup(2),
+			StaleDuration:       &staleFor,
+			Tasks: []*tasks_fake.TestTaskBasic{
+				{NodeName: nodeName, State: pod_status.Running}, {State: pod_status.Pending},
+			},
+		})
+	}
+
+	c := &cluster{topology: topology, terminatingSince: map[string]int{}, preemptedAt: map[string]int{}}
+	c.addGang(s, gangName)
+	return c
+}
+
+// addGang adds a pending medium-priority gang of s.gangSize pods of 4 GPUs.
+func (c *cluster) addGang(s scenario, name string) {
 	preemptorAge := s.preemptorAge
 	if preemptorAge == 0 {
 		preemptorAge = 30 * time.Minute
 	}
 	gang := &jobs_fake.TestJobBasic{
-		Name:                gangName,
+		Name:                name,
 		Namespace:           namespace,
 		QueueName:           queueName,
 		Priority:            preemptorPriority,
@@ -308,6 +509,9 @@ func buildCluster(s scenario) *cluster {
 	if s.preemptionDelay > 0 {
 		gang.PreemptionDelay = &metav1.Duration{Duration: s.preemptionDelay}
 	}
+	if s.gangMinAvailable > 0 {
+		gang.RootSubGroupSet = jobs_fake.DefaultSubGroup(int32(s.gangMinAvailable))
+	}
 	for i := 0; i < s.gangSize; i++ {
 		task := &tasks_fake.TestTaskBasic{State: pod_status.Pending}
 		if s.withAntiAffinity {
@@ -315,17 +519,15 @@ func buildCluster(s scenario) *cluster {
 			task.PodAntiAffinityTopologyKey = hostnameLabel
 		}
 		if s.withChannelClaim {
-			claim := podClaimName(gangName, i)
+			claim := podClaimName(name, i)
 			task.ResourceClaimTemplates = map[string]string{"channel": claim}
-			topology.ResourceClaims = append(topology.ResourceClaims, &dra_fake.TestResourceClaim{
+			c.topology.ResourceClaims = append(c.topology.ResourceClaims, &dra_fake.TestResourceClaim{
 				Name: claim, Namespace: namespace, DeviceClassName: channelClass, Count: 1,
 			})
 		}
 		gang.Tasks = append(gang.Tasks, task)
 	}
-	topology.Jobs = append(topology.Jobs, gang)
-
-	return &cluster{topology: topology, terminatingSince: map[string]int{}}
+	c.topology.Jobs = append(c.topology.Jobs, gang)
 }
 
 // schedulerConfig is the production action list (consolidation off) and plugin list, with optional
@@ -348,8 +550,13 @@ func schedulerConfig(s scenario) *conf.SchedulerConfiguration {
 	return config
 }
 
-// applyJobOverrides sets what the fake job builders do not expose: how long each victim has been running.
-func applyJobOverrides(ssn *framework.Session, s scenario) {
+// applyJobOverrides sets what the fake job builders do not expose, as of the session's simulated time: how long
+// each victim has been running, how old the gangs are, each job's LastPreemptionTimestamp and each terminating pod's deletion timestamp.
+func (c *cluster) applyJobOverrides(ssn *framework.Session, s scenario, cycle int, sessionStart time.Time) {
+	period := sessionPeriod(s)
+	atSession := func(session int) time.Time {
+		return sessionStart.Add(-time.Duration(cycle-session) * period)
+	}
 	for i := 0; i < s.nodes; i++ {
 		job := ssn.ClusterInfo.PodGroupInfos[jobID(victimName(i))]
 		if job == nil {
@@ -359,14 +566,53 @@ func applyJobOverrides(ssn *framework.Session, s scenario) {
 		if s.victimRunningFor != nil {
 			runningFor = s.victimRunningFor(i)
 		}
-		started := time.Now().Add(-runningFor)
+		started := atSession(1).Add(-runningFor)
 		job.LastStartTimestamp = &started
+	}
+	preemptorAge := s.preemptorAge
+	if preemptorAge == 0 {
+		preemptorAge = 30 * time.Minute
+	}
+	for name, createdIn := range map[string]int{gangName: 1, secondGangName: s.secondGangFromCycle} {
+		if job := ssn.ClusterInfo.PodGroupInfos[jobID(name)]; job != nil {
+			job.CreationTimestamp = metav1.NewTime(atSession(createdIn).Add(-preemptorAge))
+		}
+	}
+	for name, session := range c.preemptedAt {
+		if job := ssn.ClusterInfo.PodGroupInfos[jobID(name)]; job != nil {
+			preempted := atSession(session)
+			job.LastPreemptionTimestamp = &preempted
+		}
+	}
+	for name, session := range c.terminatingSince {
+		job := ssn.ClusterInfo.PodGroupInfos[jobID(name)]
+		if job == nil {
+			continue
+		}
+		deleted := metav1.NewTime(atSession(session))
+		for _, task := range job.GetAllPodsMap() {
+			if task.Status == pod_status.Releasing {
+				task.Pod.DeletionTimestamp = &deleted
+				if node := ssn.ClusterInfo.Nodes[task.NodeName]; node != nil && node.PodInfos[task.UID] != nil {
+					node.PodInfos[task.UID].Pod.DeletionTimestamp = &deleted
+				}
+			}
+		}
 	}
 }
 
 // advance records what the finished session did and turns it into the next session's cluster state.
 // It returns the number of pods the session evicted.
-func (c *cluster) advance(ssn *framework.Session, cycle int) int {
+func (c *cluster) advance(ssn *framework.Session, cycle int, sessionStart time.Time) int {
+	for _, job := range c.topology.Jobs {
+		preempted := ssn.ClusterInfo.PodGroupInfos[jobID(job.Name)].LastPreemptionTimestamp
+		if preempted == nil {
+			delete(c.preemptedAt, job.Name)
+		} else if !preempted.Before(sessionStart) {
+			c.preemptedAt[job.Name] = cycle
+		}
+	}
+
 	evicted := 0
 	claimStatuses := sessionClaimStatuses(ssn)
 	for _, job := range c.topology.Jobs {
@@ -461,9 +707,13 @@ func isRunning(status pod_status.PodStatus) bool {
 	return false
 }
 
-func gangState(ssn *framework.Session) string {
+func gangState(ssn *framework.Session, name string) string {
+	job := ssn.ClusterInfo.PodGroupInfos[jobID(name)]
+	if job == nil {
+		return "Absent"
+	}
 	counts := map[pod_status.PodStatus]int{}
-	for _, task := range ssn.ClusterInfo.PodGroupInfos[jobID(gangName)].GetAllPodsMap() {
+	for _, task := range job.GetAllPodsMap() {
 		switch task.Status {
 		case pod_status.Allocated, pod_status.Binding, pod_status.Bound, pod_status.Running:
 			counts[pod_status.Running]++

@@ -73,6 +73,7 @@ func TestAddFlags(t *testing.T) {
 		GPUWorkerNodeLabelKey:             constants.DefaultGPUWorkerNodeLabelKey,
 		MIGWorkerNodeLabelKey:             constants.DefaultMIGWorkerNodeLabelKey,
 		StuckInReleasingThreshold:         constants.DefaultStuckInReleasingThreshold,
+		PreemptCooldown:                   constants.DefaultPreemptCooldown,
 	}
 
 	if !reflect.DeepEqual(expected, s) {

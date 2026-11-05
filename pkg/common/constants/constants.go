@@ -27,6 +27,10 @@ const (
 	DefaultNodePoolLabelKey               = "kai.scheduler/node-pool"
 	DefaultRuntimeClassName               = "nvidia"
 	DefaultStuckInReleasingThreshold      = 2 * time.Minute
+	// DefaultPreemptCooldown is how long a job whose preemption succeeded may not trigger another one while
+	// pods evicted since then are still terminating. It outlasts DefaultStuckInReleasingThreshold, after
+	// which a terminating pod's resources stop counting as about to be freed.
+	DefaultPreemptCooldown = 3 * time.Minute
 
 	ActionDefault       = "default"
 	ActionReclaim       = "reclaim"
@@ -65,6 +69,7 @@ const (
 	StalePodgroupTimeStamp        = "kai.scheduler/stale-podgroup-timestamp"
 	LastStartTimeStamp            = "kai.scheduler/last-start-timestamp"
 	LastEvictionTimeStamp         = "kai.scheduler/last-eviction-timestamp"
+	LastPreemptorTimeStamp        = "kai.scheduler/last-preemptor-timestamp"
 	GpuSharingConfigMapAnnotation = "runai/shared-gpu-configmap"
 	NvidiaVisibleDevices          = "NVIDIA_VISIBLE_DEVICES"
 	NumaPlacementPredicted        = "kai.scheduler/numa-placement-predicted"

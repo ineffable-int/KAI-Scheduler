@@ -599,6 +599,12 @@ func (ssn *Session) AllowConsolidatingReclaim() bool {
 	return ssn.SchedulerParams.AllowConsolidatingReclaim
 }
 
+// PreemptCooldown is how long a job whose preemption succeeded may not trigger another one while pods
+// evicted since then are still terminating; 0 disables it.
+func (ssn *Session) PreemptCooldown() time.Duration {
+	return ssn.SchedulerParams.PreemptCooldown
+}
+
 func (ssn *Session) GetGlobalDefaultStalenessGracePeriod() time.Duration {
 	return ssn.SchedulerParams.GlobalDefaultStalenessGracePeriod
 }
