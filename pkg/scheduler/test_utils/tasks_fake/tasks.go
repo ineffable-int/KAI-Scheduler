@@ -30,6 +30,8 @@ type TestTaskBasic struct {
 	State             pod_status.PodStatus
 	NodeName          string // Relevant if job is running
 	NodeAffinityNames []string
+	// NodeSelector is set as the pod's spec.nodeSelector.
+	NodeSelector      map[string]string
 	Annotations       map[string]string
 	PodAffinityLabels map[string]string
 	// PodAffinityLabels are put on the pod and, by default, also select the pods it attracts and
@@ -103,6 +105,10 @@ func BuildPod(
 		}
 	} else if len(gpuGroups) > 0 {
 		pod.Labels[pod_info.GPUGroup] = gpuGroups[0]
+	}
+
+	if len(task.NodeSelector) > 0 {
+		pod.Spec.NodeSelector = maps.Clone(task.NodeSelector)
 	}
 
 	if len(task.NodeAffinityNames) > 0 {
