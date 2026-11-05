@@ -299,7 +299,7 @@ func viableDomains(
 		if !found {
 			continue
 		}
-		podsByDomain[domain] += int(freeableGPUs(node, victims) / gpusPerPod)
+		podsByDomain[domain] += podsThatFit(node, victims, gpusPerPod)
 	}
 	viable := sets.New[string]()
 	for domain, pods := range podsByDomain {
@@ -335,6 +335,16 @@ func descendantPodSets(group subgroup_info.SubGroupMember) []*subgroup_info.PodS
 		return podSets
 	}
 	return nil
+}
+
+// gpuEpsilon absorbs the float error of freeableGPUs, which subtracts fractional GPU quotas: a
+// node with 7 free GPUs must not come out as 6.999999999 and truncate to 6 pods.
+const gpuEpsilon = 1e-6
+
+// podsThatFit is the number of pods of gpusPerPod whole GPUs the node holds once every victim is
+// evicted.
+func podsThatFit(node *node_info.NodeInfo, victims map[common_info.PodGroupID]*podgroup_info.PodGroupInfo, gpusPerPod float64) int {
+	return int((freeableGPUs(node, victims) + gpuEpsilon) / gpusPerPod)
 }
 
 // freeableGPUs is the node's GPUs minus those used by pods that are not victims.
