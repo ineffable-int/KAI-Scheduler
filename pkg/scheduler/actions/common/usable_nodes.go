@@ -77,29 +77,42 @@ func NodesUsableByJob(
 	}
 
 	filters := nodeFilters(ssn)
+	// The filters only read the cycle state (NodeAffinity falls back to the pod when it holds no
+	// prefilter state, TaintToleration ignores it), so one state serves every pair.
+	state := k8s_internal.NewSessionState()
+	k8sNodes := map[string]*k8sframework.NodeInfo{}
 	// Tasks with the same node constraints have the same statically usable nodes.
 	var representatives []*pod_info.PodInfo
 	var staticNodes []sets.Set[string]
+	staticNodesByTask := map[*pod_info.PodInfo]sets.Set[string]{}
 	staticNodesOf := func(task *pod_info.PodInfo) sets.Set[string] {
+		if nodes, found := staticNodesByTask[task]; found {
+			return nodes
+		}
 		for i, rep := range representatives {
 			if sameNodeConstraints(task.Pod, rep.Pod) {
+				staticNodesByTask[task] = staticNodes[i]
 				return staticNodes[i]
 			}
 		}
 		nodes := sets.New[string]()
 		for name, node := range ssn.ClusterInfo.Nodes {
-			if taskCanUseNode(task, node, filters) {
+			if taskCanUseNode(task, node, k8sNodes, state, filters) {
 				nodes.Insert(name)
 			}
 		}
 		representatives = append(representatives, task)
 		staticNodes = append(staticNodes, nodes)
+		staticNodesByTask[task] = nodes
 		return nodes
 	}
 
+	groupsByTask := map[*pod_info.PodInfo][]subgroup_info.SubGroupMember{}
 	tasksByGroup := map[subgroup_info.SubGroupMember][]*pod_info.PodInfo{}
 	for _, task := range tasks {
-		for _, group := range requiredTopologyGroups(job, task) {
+		groups := requiredTopologyGroups(job, task)
+		groupsByTask[task] = groups
+		for _, group := range groups {
 			tasksByGroup[group] = append(tasksByGroup[group], task)
 		}
 	}
@@ -109,7 +122,9 @@ func NodesUsableByJob(
 		for group, groupTasks := range tasksByGroup {
 			nodes := sets.New[string]()
 			for _, task := range groupTasks {
-				nodes = nodes.Union(staticNodesOf(task))
+				for name := range staticNodesOf(task) {
+					nodes.Insert(name)
+				}
 			}
 			if viable, ok := viableDomains(ssn, group, groupTasks, nodes, victims); ok {
 				domains[group] = viable
@@ -119,7 +134,7 @@ func NodesUsableByJob(
 
 	usable := sets.New[string]()
 	for _, task := range tasks {
-		groups := requiredTopologyGroups(job, task)
+		groups := groupsByTask[task]
 		for name := range staticNodesOf(task) {
 			if inViableDomains(ssn.ClusterInfo.Nodes[name], groups, domains) {
 				usable.Insert(name)
@@ -191,18 +206,26 @@ func nodeFilters(ssn *framework.Session) []k8s_internal.NodeFilter {
 	return filters
 }
 
-func taskCanUseNode(task *pod_info.PodInfo, node *node_info.NodeInfo, filters []k8s_internal.NodeFilter) bool {
+// taskCanUseNode runs the pod-independent predicates. k8sNodes caches the framework node of each
+// node name across calls.
+func taskCanUseNode(
+	task *pod_info.PodInfo, node *node_info.NodeInfo, k8sNodes map[string]*k8sframework.NodeInfo,
+	state k8s_internal.SessionState, filters []k8s_internal.NodeFilter,
+) bool {
 	if task.Pod == nil || node == nil || node.Node == nil {
 		return true
 	}
 	if fit, _, _ := scheduler_util.CheckNodeConditionPredicate(node.Node, task.Pod.Spec.Tolerations); !fit {
 		return false
 	}
-	nodeInfo := k8sframework.NewNodeInfo()
-	nodeInfo.SetNode(node.Node)
+	nodeInfo, found := k8sNodes[node.Name]
+	if !found {
+		nodeInfo = k8sframework.NewNodeInfo()
+		nodeInfo.SetNode(node.Node)
+		k8sNodes[node.Name] = nodeInfo
+	}
 	for _, filter := range filters {
-		status := filter.Filter(context.Background(), k8s_internal.NewSessionState(), task.Pod, nodeInfo)
-		if !status.IsSuccess() {
+		if status := filter.Filter(context.Background(), state, task.Pod, nodeInfo); !status.IsSuccess() {
 			return false
 		}
 	}
