@@ -149,9 +149,6 @@ func TestPreemptCooldownBlocks(t *testing.T) {
 				{status: pod_status.Running},
 			},
 			wantBlocked: true,
-			wantLog: []string{
-				"[preempt-cooldown] skipping job <ns/gang> as preemptor: seconds_left=120 releasing_victims=3",
-			},
 		},
 		{
 			name:          "victim deleted slightly before the recorded time (clock skew) still blocks",
@@ -159,9 +156,6 @@ func TestPreemptCooldownBlocks(t *testing.T) {
 			lastPreempted: &preempted,
 			pods:          []cooldownPod{{status: pod_status.Releasing, deleted: &skewed}},
 			wantBlocked:   true,
-			wantLog: []string{
-				"[preempt-cooldown] skipping job <ns/gang> as preemptor: seconds_left=120 releasing_victims=1",
-			},
 		},
 		{
 			name:          "victims gone: window ends early and the timestamp is cleared",
@@ -188,7 +182,7 @@ func TestPreemptCooldownBlocks(t *testing.T) {
 			cooldown := newPreemptCooldown(cooldownSession(tt.cooldown, tt.pods...))
 
 			assert.Equal(t, tt.wantBlocked, cooldown.blocks(job, now))
-			// A second action in the same session decides the same way but does not log the skip again.
+			// A second action in the same session decides the same way.
 			assert.Equal(t, tt.wantBlocked, cooldown.blocks(job, now))
 
 			if tt.wantCleared {

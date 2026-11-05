@@ -39,10 +39,8 @@ const preemptCooldownClockSkew = 2 * time.Second
 type preemptCooldown struct {
 	ssn      *framework.Session
 	cooldown time.Duration
-	// releasingDeleted holds, for every terminating pod in the session, its deletion timestamp; a pod evicted in
-	// this session (not deleted yet) has the zero time. Collected on first use, together with the two
-	// summaries below that make blocks constant-time.
-	releasingDeleted []time.Time
+	// The terminating pods of the session, summarised on first use so that blocks is constant-time. A pod
+	// evicted in this session has no deletion timestamp yet.
 	// anyNotDeleted: some terminating pod has no deletion timestamp yet.
 	anyNotDeleted bool
 	// latestDeleted is the latest deletion timestamp among the terminating pods (zero when there is none).
@@ -71,12 +69,6 @@ func (pc *preemptCooldown) blocks(job *podgroup_info.PodGroupInfo, now time.Time
 			job.NamespacedName)
 		return false
 	}
-	if job.MarkPreemptCooldownLogged() {
-		// TODO(II-2486): remove after rollout verification.
-		log.InfraLogger.Infof(
-			"[preempt-cooldown] skipping job <%s> as preemptor: seconds_left=%d releasing_victims=%d",
-			job.NamespacedName, int(end.Sub(now).Seconds()), pc.countTerminatingSince(since))
-	}
 	return true
 }
 
@@ -102,7 +94,6 @@ func (pc *preemptCooldown) collect() {
 			if pod.Pod != nil && pod.Pod.DeletionTimestamp != nil {
 				deleted = pod.Pod.DeletionTimestamp.Time
 			}
-			pc.releasingDeleted = append(pc.releasingDeleted, deleted)
 			if deleted.IsZero() {
 				pc.anyNotDeleted = true
 			} else if deleted.After(pc.latestDeleted) {
@@ -110,16 +101,4 @@ func (pc *preemptCooldown) collect() {
 			}
 		}
 	}
-}
-
-// countTerminatingSince counts terminating pods deleted at or after since (or not deleted yet). It is only
-// needed for the log line, so it is not on the path of blocks.
-func (pc *preemptCooldown) countTerminatingSince(since time.Time) int {
-	count := 0
-	for _, deleted := range pc.releasingDeleted {
-		if deleted.IsZero() || !deleted.Before(since) {
-			count++
-		}
-	}
-	return count
 }

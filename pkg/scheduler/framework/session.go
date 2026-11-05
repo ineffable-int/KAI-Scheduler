@@ -539,6 +539,8 @@ func (ssn *Session) clearElapsedPreemptCooldowns(now time.Time) {
 		end := job.PreemptCooldownEnd(ssn.PreemptCooldown())
 		if end == nil || !now.Before(*end) {
 			job.LastPreemptionTimestamp = nil
+			// TODO(II-2486): remove after rollout verification.
+			log.InfraLogger.Infof("[preempt-cooldown] window for job <%s> expired", job.NamespacedName)
 		}
 	}
 }

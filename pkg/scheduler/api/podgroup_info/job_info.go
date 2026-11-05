@@ -101,9 +101,6 @@ type PodGroupInfo struct {
 	PodStatusIndex                          map[pod_status.PodStatus]pod_info.PodsMap
 	activeAllocatedCount                    *int
 	aliveTasksRequestedGPUs                 *float64
-
-	// TODO(II-2486): remove after rollout verification, with the [preempt-cooldown] log lines.
-	preemptCooldownLogged bool
 }
 
 func NewPodGroupInfo(uid common_info.PodGroupID, tasks ...*pod_info.PodInfo) *PodGroupInfo {
@@ -240,15 +237,6 @@ func (pgi *PodGroupInfo) PreemptCooldownEnd(cooldown time.Duration) *time.Time {
 	}
 	end := pgi.LastPreemptionTimestamp.Add(cooldown)
 	return &end
-}
-
-// MarkPreemptCooldownLogged reports whether this is the first call in this session (a PodGroupInfo lives for one
-// session), so the cool-down skip is logged at most once per job per session.
-// TODO(II-2486): remove after rollout verification.
-func (pgi *PodGroupInfo) MarkPreemptCooldownLogged() bool {
-	first := !pgi.preemptCooldownLogged
-	pgi.preemptCooldownLogged = true
-	return first
 }
 
 // IsSemiPreemptibleJob reports whether only the job's core (minimal satisfying shape) is protected,
