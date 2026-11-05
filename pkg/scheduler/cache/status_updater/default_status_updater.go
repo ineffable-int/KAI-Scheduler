@@ -211,9 +211,9 @@ func (su *defaultStatusUpdater) RecordJobStatusEvent(
 	var err error
 	var patchData []byte
 	if patchData, err = su.updatePodGroupAnnotations(job); err != nil {
-		log.InfraLogger.V(7).Do(func() {
-			log.InfraLogger.Warningf("Failed to update podgroup annotations, error: %s", err)
-		})
+		// A lost patch can drop the preempt cool-down, so it must not be silent.
+		log.InfraLogger.Errorf("Failed to update podgroup annotations for job <%s>, error: %s",
+			job.NamespacedName, err)
 	}
 	if job.StalenessInfo.Stale {
 		su.recordStaleJobEvent(job)
@@ -504,7 +504,9 @@ func (su *defaultStatusUpdater) updatePodGroupAnnotations(job *podgroup_info.Pod
 	updatedStaleTime := setPodGroupStaleTimeStamp(job.PodGroup, job.StalenessInfo.TimeStamp)
 	updatedStartTime := setPodGroupLastStartTimeStamp(job.PodGroup, job.LastStartTimestamp)
 	updatedEvictionTime := setPodGroupLastEvictionTimeStamp(job.PodGroup, job.LastEvictionTimestamp)
-	if !updatedStaleTime && !updatedStartTime && !updatedEvictionTime {
+	updatedPreemptionTime := setPodGroupTimeStampAnnotation(
+		job.PodGroup, commonconstants.LastPreemptorTimeStamp, job.LastPreemptionTimestamp)
+	if !updatedStaleTime && !updatedStartTime && !updatedEvictionTime && !updatedPreemptionTime {
 		return nil, nil
 	}
 
@@ -650,6 +652,28 @@ func setPodGroupLastEvictionTimeStamp(podGroup *enginev2alpha2.PodGroup, evictio
 	}
 
 	podGroup.Annotations[commonconstants.LastEvictionTimeStamp] = evictionTimeStamp.UTC().Format(time.RFC3339)
+	return true
+}
+
+// setPodGroupTimeStampAnnotation sets (or, for nil, removes) an RFC3339 timestamp annotation and reports whether
+// it changed.
+func setPodGroupTimeStampAnnotation(podGroup *enginev2alpha2.PodGroup, key string, timeStamp *time.Time) bool {
+	current, found := podGroup.Annotations[key]
+	if timeStamp == nil {
+		if !found {
+			return false
+		}
+		delete(podGroup.Annotations, key)
+		return true
+	}
+	value := timeStamp.UTC().Format(time.RFC3339)
+	if found && current == value {
+		return false
+	}
+	if podGroup.Annotations == nil {
+		podGroup.Annotations = make(map[string]string)
+	}
+	podGroup.Annotations[key] = value
 	return true
 }
 

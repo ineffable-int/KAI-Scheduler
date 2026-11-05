@@ -20,7 +20,8 @@ type JobsOrderInitOptions struct {
 	FilterNonPreemptible     bool
 	FilterNonActiveAllocated bool
 	// FilterWithinPreemptionDelay skips jobs that may not yet trigger eviction
-	// of other workloads. Set only by eviction-triggering actions.
+	// of other workloads: within their preemption delay or their preempt cool-down.
+	// Set only by eviction-triggering actions.
 	FilterWithinPreemptionDelay bool
 	VictimQueue                 bool
 	MaxJobsQueueDepth           int
@@ -29,6 +30,10 @@ type JobsOrderInitOptions struct {
 func (jobsOrder *JobsOrderByQueues) InitializeWithJobs(
 	jobsToOrder map[common_info.PodGroupID]*podgroup_info.PodGroupInfo) {
 	now := time.Now()
+	var cooldown *preemptCooldown
+	if jobsOrder.options.FilterWithinPreemptionDelay {
+		cooldown = newPreemptCooldown(jobsOrder.ssn)
+	}
 	for _, job := range jobsToOrder {
 		if jobsOrder.options.FilterUnready && !job.IsReadyForScheduling() {
 			continue
@@ -76,6 +81,10 @@ func (jobsOrder *JobsOrderByQueues) InitializeWithJobs(
 			recordPreemptionDelayFitError(job)
 			log.InfraLogger.V(3).Infof("Job <%s> is within its preemption delay window, skipping as eviction trigger",
 				job.NamespacedName)
+			continue
+		}
+
+		if cooldown != nil && cooldown.blocks(job, now) {
 			continue
 		}
 

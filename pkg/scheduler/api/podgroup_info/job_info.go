@@ -76,8 +76,11 @@ type PodGroupInfo struct {
 	CreationTimestamp     metav1.Time
 	LastStartTimestamp    *time.Time
 	LastEvictionTimestamp *time.Time
-	PodGroup              *enginev2alpha2.PodGroup
-	PodGroupUID           types.UID
+	// LastPreemptionTimestamp is when this job last had a preemption or reclaim committed for it, i.e. when it
+	// last caused other workloads to be evicted. Persisted in the LastPreemptorTimeStamp annotation.
+	LastPreemptionTimestamp *time.Time
+	PodGroup                *enginev2alpha2.PodGroup
+	PodGroupUID             types.UID
 
 	RootSubGroupSet      *subgroup_info.SubGroupSet
 	PodSets              map[string]*subgroup_info.PodSet
@@ -226,6 +229,16 @@ func (pgi *PodGroupInfo) IsWithinPreemptionDelay(now time.Time) bool {
 	return end != nil && now.Before(*end)
 }
 
+// PreemptCooldownEnd returns when the cool-down after this job's last committed preemption ends, or nil when
+// the job never preempted or cooldown is not positive.
+func (pgi *PodGroupInfo) PreemptCooldownEnd(cooldown time.Duration) *time.Time {
+	if cooldown <= 0 || pgi.LastPreemptionTimestamp == nil {
+		return nil
+	}
+	end := pgi.LastPreemptionTimestamp.Add(cooldown)
+	return &end
+}
+
 // IsSemiPreemptibleJob reports whether only the job's core (minimal satisfying shape) is protected,
 // leaving everything above it elastic and reclaimed first.
 func (pgi *PodGroupInfo) IsSemiPreemptibleJob() bool {
@@ -286,6 +299,17 @@ func (pgi *PodGroupInfo) SetPodGroup(pg *enginev2alpha2.PodGroup) {
 			})
 		} else {
 			pgi.LastEvictionTimestamp = &evictionTime
+		}
+	}
+
+	if pg.Annotations[commonconstants.LastPreemptorTimeStamp] != "" {
+		preemptionTime, err := time.Parse(time.RFC3339, pg.Annotations[commonconstants.LastPreemptorTimeStamp])
+		if err != nil {
+			// An unparsable timestamp disables the preempt cool-down for the job, so it must not be silent.
+			log.InfraLogger.Warningf("Failed to parse preemption timestamp for podgroup <%s> err: %v",
+				pgi.NamespacedName, err)
+		} else {
+			pgi.LastPreemptionTimestamp = &preemptionTime
 		}
 	}
 

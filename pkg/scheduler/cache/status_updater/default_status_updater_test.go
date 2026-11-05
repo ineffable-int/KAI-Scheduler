@@ -777,6 +777,45 @@ func TestDefaultStatusUpdater_RecordJobStatusEvent(t *testing.T) {
 	}
 }
 
+// A running job has no pending tasks, yet a cleared preempt cool-down must still reach the PodGroup.
+func TestDefaultStatusUpdater_RecordJobStatusEventRemovesClearedPreemptorTimeStamp(t *testing.T) {
+	job := jobs_fake.TestJobBasic{
+		Name:      "test-job",
+		Namespace: "test-ns",
+		QueueName: "test-queue",
+		Tasks:     []*tasks_fake.TestTaskBasic{{Name: "test-task", State: pod_status.Running}},
+	}
+	jobInfos, _, _ := jobs_fake.BuildJobsAndTasksMaps([]*jobs_fake.TestJobBasic{&job}, resource_info.NewResourceVectorMap())
+	podGroupInfo := jobInfos[common_info.NewPodGroupID(job.Namespace, job.Name)]
+	podGroupInfo.PodGroup.Annotations = map[string]string{
+		commonconstants.LastPreemptorTimeStamp: "2026-11-05T12:00:00Z",
+	}
+	podGroupInfo.LastPreemptionTimestamp = nil // cleared by the session
+
+	kubeAiSchedClient := kubeaischedfake.NewSimpleClientset(podGroupInfo.PodGroup)
+	patches := make(chan []byte, 1)
+	kubeAiSchedClient.SchedulingV2alpha2().(*fakeschedulingv2alpha2.FakeSchedulingV2alpha2).PrependReactor(
+		"patch", "podgroups", func(action faketesting.Action) (bool, runtime.Object, error) {
+			patches <- action.(faketesting.PatchAction).GetPatch()
+			return false, nil, nil
+		},
+	)
+	statusUpdater := New(fake.NewSimpleClientset(), kubeAiSchedClient, record.NewFakeRecorder(100), 1, false, nodePoolLabelKey)
+	stopCh := make(chan struct{})
+	defer close(stopCh)
+	statusUpdater.Run(stopCh)
+
+	assert.NoError(t, statusUpdater.RecordJobStatusEvent(podGroupInfo, nil))
+
+	select {
+	case patch := <-patches:
+		assert.Contains(t, string(patch),
+			`{"op":"remove","path":"/metadata/annotations/kai.scheduler~1last-preemptor-timestamp"}`)
+	case <-time.After(10 * time.Second):
+		t.Fatal("the podgroup was not patched")
+	}
+}
+
 func TestDefaultStatusUpdater_RecordStaleJobEvent(t *testing.T) {
 	tests := []struct {
 		name          string
@@ -1306,4 +1345,49 @@ func TestUpdateCorePods(t *testing.T) {
 		assert.False(t, updateCorePods(job))
 		assert.Nil(t, job.PodGroup.Status.SchedulingState)
 	})
+}
+
+func TestUpdatePodGroupAnnotationsLastPreemptorTimeStamp(t *testing.T) {
+	preemption := time.Date(2026, 11, 5, 12, 0, 0, 0, time.UTC)
+	key := commonconstants.LastPreemptorTimeStamp
+	for _, test := range []struct {
+		name        string
+		annotations map[string]string
+		timeStamp   *time.Time
+		want        *string
+		wantUpdated bool
+	}{
+		{name: "nothing to write", timeStamp: nil, wantUpdated: false},
+		{name: "add", timeStamp: &preemption, want: ptr.To("2026-11-05T12:00:00Z"), wantUpdated: true},
+		{
+			name: "unchanged", annotations: map[string]string{key: "2026-11-05T12:00:00Z"},
+			timeStamp: &preemption, want: ptr.To("2026-11-05T12:00:00Z"), wantUpdated: false,
+		},
+		{
+			name: "update", annotations: map[string]string{key: "2026-11-05T11:00:00Z"},
+			timeStamp: &preemption, want: ptr.To("2026-11-05T12:00:00Z"), wantUpdated: true,
+		},
+		{
+			name: "remove (cool-down ended early)", annotations: map[string]string{key: "2026-11-05T12:00:00Z"},
+			timeStamp: nil, wantUpdated: true,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			job := &podgroup_info.PodGroupInfo{
+				PodGroup:                &enginev2alpha2.PodGroup{ObjectMeta: metav1.ObjectMeta{Annotations: test.annotations}},
+				LastPreemptionTimestamp: test.timeStamp,
+			}
+			su := &defaultStatusUpdater{}
+			patch, err := su.updatePodGroupAnnotations(job)
+			assert.NoError(t, err)
+			assert.Equal(t, test.wantUpdated, patch != nil, "patch: %s", patch)
+
+			value, found := job.PodGroup.Annotations[key]
+			if test.want == nil {
+				assert.False(t, found)
+			} else {
+				assert.Equal(t, *test.want, value)
+			}
+		})
+	}
 }

@@ -58,6 +58,9 @@ type TestResourceSlice struct {
 	AllNodes bool `json:"allNodes,omitempty" protobuf:"bytes,5,opt,name=allNodes"`
 
 	Count int
+
+	// Driver is the DRA driver of the slice's devices. Defaults to "nvidia.com/gpu".
+	Driver string
 }
 
 type TestResourceClaim struct {
