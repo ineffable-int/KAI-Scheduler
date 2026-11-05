@@ -115,6 +115,7 @@ func TestPreemptCooldownBlocks(t *testing.T) {
 	before := preempted.Add(-10 * time.Second)
 	sameSecond := preempted.Truncate(time.Second)
 	after := preempted.Add(5 * time.Second)
+	skewed := preempted.Add(-1500 * time.Millisecond) // scheduler clock ahead of the API server's
 
 	for _, tt := range []struct {
 		name          string
@@ -150,6 +151,16 @@ func TestPreemptCooldownBlocks(t *testing.T) {
 			wantBlocked: true,
 			wantLog: []string{
 				"[preempt-cooldown] skipping job <ns/gang> as preemptor: seconds_left=120 releasing_victims=3",
+			},
+		},
+		{
+			name:          "victim deleted slightly before the recorded time (clock skew) still blocks",
+			cooldown:      3 * time.Minute,
+			lastPreempted: &preempted,
+			pods:          []cooldownPod{{status: pod_status.Releasing, deleted: &skewed}},
+			wantBlocked:   true,
+			wantLog: []string{
+				"[preempt-cooldown] skipping job <ns/gang> as preemptor: seconds_left=120 releasing_victims=1",
 			},
 		},
 		{

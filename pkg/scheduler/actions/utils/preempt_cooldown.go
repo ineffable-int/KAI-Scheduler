@@ -31,6 +31,10 @@ func RecordPreemption(ssn *framework.Session, job *podgroup_info.PodGroupInfo, a
 		job.NamespacedName, victims, at.Add(cooldown).UTC().Format(time.RFC3339))
 }
 
+// preemptCooldownClockSkew is how far the scheduler's clock may be ahead of the API server's, which stamps pod
+// deletion timestamps, before a victim of the recorded preemption looks as if it was deleted earlier.
+const preemptCooldownClockSkew = 2 * time.Second
+
 // preemptCooldown decides, for one action's input jobs, which jobs are still in their cool-down.
 type preemptCooldown struct {
 	ssn      *framework.Session
@@ -71,7 +75,7 @@ func (pc *preemptCooldown) blocks(job *podgroup_info.PodGroupInfo, now time.Time
 }
 
 // terminatingSince counts terminating pods deleted at or after since. Annotation timestamps have second
-// precision, so since is truncated to the second.
+// precision, so since is truncated to the second, after allowing for preemptCooldownClockSkew.
 func (pc *preemptCooldown) terminatingSince(since time.Time) int {
 	if !pc.collected {
 		pc.collected = true
@@ -88,7 +92,7 @@ func (pc *preemptCooldown) terminatingSince(since time.Time) int {
 			}
 		}
 	}
-	since = since.Truncate(time.Second)
+	since = since.Add(-preemptCooldownClockSkew).Truncate(time.Second)
 	count := 0
 	for _, deleted := range pc.releasingSince {
 		if deleted.IsZero() || !deleted.Before(since) {
