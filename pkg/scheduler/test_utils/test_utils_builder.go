@@ -140,6 +140,7 @@ func BuildQueueInfoMap(testMetadata TestTopologyBasic) map[common_info.QueueID]*
 				ParentQueue:       queue.ParentQueue,
 				Priority:          queue.Priority,
 				ReclaimMinRuntime: queue.ReclaimMinRuntime,
+				PreemptMinRuntime: queue.PreemptMinRuntime,
 				Resources: &enginev2.QueueResources{
 					GPU: enginev2.QueueResource{
 						Quota:           queue.DeservedGPUs,
@@ -453,6 +454,10 @@ func getResourceSlices(testMetadata TestTopologyBasic) []*resourceapi.ResourceSl
 
 	var objects []*resourceapi.ResourceSlice
 	for _, resourceSlice := range testMetadata.ResourceSlices {
+		driver := "nvidia.com/gpu"
+		if resourceSlice.Driver != "" {
+			driver = resourceSlice.Driver
+		}
 		resourceSliceObject := resourceapi.ResourceSlice{
 			TypeMeta: metav1.TypeMeta{
 				Kind:       "ResourceSlice",
@@ -463,7 +468,7 @@ func getResourceSlices(testMetadata TestTopologyBasic) []*resourceapi.ResourceSl
 				ResourceVersion: "0",
 			},
 			Spec: resourceapi.ResourceSliceSpec{
-				Driver: "nvidia.com/gpu",
+				Driver: driver,
 				Pool: resourceapi.ResourcePool{
 					Name:               resourceSlice.NodeName,
 					ResourceSliceCount: poolSliceCounts[resourceSlice.NodeName],
