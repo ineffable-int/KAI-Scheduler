@@ -132,8 +132,49 @@ func computePodGroupMinSubGroup(jobSet *unstructured.Unstructured, replicatedJob
 	if orderPolicy == startupPolicyOrderInOrder {
 		return 1, nil
 	}
+
+	// When any replicatedJob declares dependsOn, JobSet only creates the initial
+	// wave up front: the replicatedJobs that depend on nothing. The dependent
+	// Jobs -- and therefore their pods -- do not exist until their predecessors
+	// reach the required status, so requiring every replicatedJob to be present
+	// would leave the PodGroup permanently unschedulable.
+	//
+	// The initial wave is still treated as a gang: counting it (rather than
+	// returning a blanket 1) keeps JobSets whose first wave holds several
+	// independent roles from being admitted one role at a time.
+	initialWave, err := countInitialWaveReplicatedJobs(replicatedJobs)
+	if err != nil {
+		return 0, err
+	}
+	if initialWave < numReplicatedJobs {
+		if initialWave < 1 {
+			// Defensive: the JobSet API forbids dependsOn on the first
+			// replicatedJob, so a wave of zero should be unreachable.
+			return 1, nil
+		}
+		return initialWave, nil
+	}
+
 	// If the order policy is AnyOrder, set the MinSubGroup to the number of replicatedJobs.
 	return numReplicatedJobs, nil
+}
+
+// countInitialWaveReplicatedJobs returns the number of replicatedJobs that
+// declare no dependsOn entries. These are the replicatedJobs JobSet creates
+// immediately; the rest are created only once their dependencies are met.
+// When no replicatedJob uses dependsOn this equals len(replicatedJobs).
+func countInitialWaveReplicatedJobs(replicatedJobs []map[string]any) (int32, error) {
+	count := int32(0)
+	for i, rj := range replicatedJobs {
+		dependsOn, found, err := unstructured.NestedSlice(rj, "dependsOn")
+		if err != nil {
+			return 0, fmt.Errorf("failed to read replicatedJobs[%d].dependsOn: %w", i, err)
+		}
+		if !found || len(dependsOn) == 0 {
+			count++
+		}
+	}
+	return count, nil
 }
 
 // buildSubGroups produces the parent-per-replicatedJob / leaf-per-replica tree.
