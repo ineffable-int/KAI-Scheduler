@@ -170,5 +170,8 @@ func getReclaimVictimCandidates(
 		}
 		jobs[job.UID] = job
 	}
+	// Drops victims that free nothing the reclaimer can use. A nil usable-node set (no
+	// restriction) keeps every candidate; an empty one drops them all.
+	common.FilterVictimsToUsableNodes(ssn, reclaimer, jobs, framework.Reclaim)
 	return jobs
 }
