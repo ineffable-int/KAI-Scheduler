@@ -435,11 +435,9 @@ func (s *VictimFilterStats) countExcluded(job *podgroup_info.PodGroupInfo) {
 }
 
 func (s *VictimFilterStats) log(ssn *framework.Session, preemptor *podgroup_info.PodGroupInfo, action framework.ActionType) {
+	// Only decisions that change the victim set are logged: every pending job tries to preempt and
+	// reclaim each session, so a line per attempt would flood the scheduler log.
 	if s.ExcludedJobs == 0 {
-		// TODO(II-2486): remove after rollout verification
-		log.InfraLogger.Infof("[victim-filter] preemptor=%s/%s action=%s nodes=%d usable_nodes=%d "+
-			"victim_jobs=%d excluded_jobs=0 excluded_pods=0",
-			preemptor.Namespace, preemptor.Name, action, len(ssn.ClusterInfo.Nodes), s.UsableNodes, s.CandidateJobs)
 		return
 	}
 	sample := make([]string, 0, len(s.ExcludedNodes))
